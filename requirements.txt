@@ -1,0 +1,4 @@
+# Already present in any ComfyUI install — listed for clarity.
+torch
+numpy
+Pillow

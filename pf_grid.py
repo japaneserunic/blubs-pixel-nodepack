@@ -1,0 +1,208 @@
+"""Pixel-grid recovery: undo H3's blocky 'pixel-ish' render before pixelizing.
+
+H3 draws 'pixel art' as blocks of several screen pixels (commonly 4x4). When
+the quantize/finalize step downscales straight from video res, those blocks get
+averaged into mush and a 64x64 target reads like 16x16. This node detects the
+source block grid (size + phase), block-reduces every frame back to the TRUE
+art grid (majority/median/nearest per block), and hands downstream nodes clean
+1:1 pixels. Non-destructive: a separate node, old workflows untouched.
+"""
+
+import json
+
+import numpy as np
+import torch
+
+from .pf_finalize import _detect_pixel_grid
+
+
+def _to_np(images):
+    return (images.clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
+
+
+def _to_tensor(arr_uint8):
+    return torch.from_numpy(arr_uint8.astype(np.float32) / 255.0)
+
+
+def _trimmed_mean(px, widths=(8.0,), win=None):
+    """px (B, N, 3) float -> (B, 3). Median-anchored iterative trimmed mean:
+    start at the per-block median (robust to outlier pixels), then average
+    only pixels within +-width of the running center (max channel distance),
+    tightening the window each round. Median-anchored windows cut SYMMETRIC
+    slices of the noise distribution, so the result stays unbiased (unlike
+    fixed color-bin selection, which clips an off-center slice of the noise
+    whenever the true color sits near a bin edge -> bin-center bias)."""
+    m = np.nanmedian(px, axis=1)                       # (B,3)
+    base = np.nan_to_num(m, nan=0.0)
+    for w in widths:
+        d = np.abs(px - m[:, None, :]).max(-1)         # (B,N)
+        sel = d <= w
+        if win is not None:
+            sel &= win
+        cnt = sel.sum(1)
+        ssum = np.where(sel[..., None], px, 0.0).sum(1)
+        out = ssum / np.maximum(cnt, 1)[:, None]
+        none = cnt == 0
+        if none.any():
+            out[none] = base[none]
+        m = out
+    return m
+
+
+def _reduce_blocks(crop, s, mode):
+    """crop (H,W,3) uint8 with H,W multiples of s -> (H//s, W//s, 3) uint8."""
+    gh, gw = crop.shape[0] // s, crop.shape[1] // s
+    blocks = crop.reshape(gh, s, gw, s, 3)
+    if mode == "nearest":
+        c = s // 2
+        return blocks[:, c, :, c, :].copy()
+    ss = s * s
+    px = blocks.transpose(0, 2, 1, 3, 4).reshape(-1, ss, 3).astype(np.float32)
+    if mode == "median":
+        # single wide trim: best for noisy but single-color blocks
+        return _trimmed_mean(px, (8.0,)).round().astype(np.uint8).reshape(gh, gw, 3)
+    # majority: two rounds, window tightens 12 -> 6. The median anchor lands
+    # in the dominant color cluster even for edge-straddle blocks; the
+    # tightening second round snaps to that cluster and drops the minority
+    # side + stray outliers, staying unbiased for symmetric noise.
+    return _trimmed_mean(px, (12.0, 8.0)).round().astype(np.uint8).reshape(gh, gw, 3)
+
+
+class PixelForgeGridRecover:
+    """Recover the TRUE pixel grid H3 rendered, before pixelizing.
+
+    auto mode sniffs the apparent block size + phase (autocorrelation of the
+    edge profile + variance-scored phase search, shared with True Pixel
+    Finalize), crops to the grid, then block-reduces every frame so each
+    output pixel is one real art pixel. Wire grid_width/grid_height into the
+    Quantize/Finalize node's pixel_width/height (widget -> input) for a 1:1
+    mapping, or set any smaller target and use downsample_filter=nearest —
+    either way no block averaging, no mush."""
+
+    CATEGORY = "PixelForge/pixel"
+    FUNCTION = "run"
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "STRING")
+    RETURN_NAMES = ("images", "alpha", "grid_width", "grid_height", "grid_info")
+    DESCRIPTION = ("Detect the pixel-block grid H3 already drew (block size + phase) and "
+                   "block-reduce frames back to the true art grid: majority/median/nearest "
+                   "per block. Chain BEFORE Sprite Chroma Key / Pixel Art Quantize and set "
+                   "the quantize downsample filter to 'nearest' (or wire grid_width into "
+                   "pixel_width). Fixes '64x64 target reads like 16x16'.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "mode": (["auto", "manual"],
+                         {"tooltip": "auto = detect block size + phase from the frames. "
+                                     "manual = use manual_block with zero offset."}),
+                "manual_block": ("INT", {"default": 4, "min": 1, "max": 32,
+                                         "tooltip": "Block size for manual mode, and the fallback when auto "
+                                                    "finds no convincing grid. 1 = passthrough."}),
+                "max_block": ("INT", {"default": 12, "min": 2, "max": 32,
+                                      "tooltip": "Largest block size auto detection considers."}),
+                "reduce": (["median", "majority", "nearest"],
+                           {"tooltip": "How each block becomes one pixel. median = robust average "
+                                       "(best default for noisy H3 blocks), majority = modal color bin "
+                                       "(best for flat art with stray outlier pixels), "
+                                       "nearest = block center sample (sharpest, noisiest)."}),
+                "restore_size": ("BOOLEAN", {"default": False,
+                                             "tooltip": "Nearest-upscale the recovered grid back to the grid-snapped "
+                                                        "source size. Off = emit the small true-grid frames "
+                                                        "(recommended; pixelize from there)."}),
+            },
+            "optional": {
+                "alpha": ("MASK", {"tooltip": "Optional matte to crop/reduce alongside the frames."}),
+            },
+        }
+
+    def run(self, images, mode, manual_block, max_block, reduce, restore_size,
+            alpha=None):
+        arr = _to_np(images)
+        n, h, w, _ = arr.shape
+        info = {"source_size": [w, h], "reduce": reduce, "mode": mode}
+
+        s, ox, oy = 1, 0, 0
+        auto_detected = False
+        if mode == "auto":
+            probe = np.median(arr[:min(8, n)].astype(np.float32),
+                              axis=0).astype(np.uint8)
+            det = _detect_pixel_grid(probe, s_max=max_block)
+            if det is not None:
+                s, ox, oy = det
+                auto_detected = True
+        if not auto_detected:
+            s = manual_block
+            if mode == "auto":
+                print("[PixelForgeGridRecover] auto: no confident grid, "
+                      "falling back to manual_block=%d" % manual_block)
+        info["auto_detected"] = bool(auto_detected)
+        info["block"] = int(s)
+        info["offset"] = [int(ox), int(oy)]
+
+        am = None
+        if alpha is not None:
+            m = alpha.cpu().numpy()
+            am = [np.clip(m[min(i, m.shape[0] - 1)], 0, 1) for i in range(n)]
+
+        if s <= 1:
+            gw, gh = w, h
+            out_rgb = arr
+            out_a = (np.stack(am) if am is not None
+                     else np.ones((n, h, w), dtype=np.float32)).astype(np.float32)
+            info.update({"grid_size": [gw, gh], "note": "passthrough (block=1)"})
+            return (_to_tensor(out_rgb), torch.from_numpy(out_a), gw, gh,
+                    json.dumps(info))
+
+        new_w = s * ((w - ox) // s)
+        new_h = s * ((h - oy) // s)
+        if new_w < 8 or new_h < 8:
+            gw, gh = w, h
+            out_rgb = arr
+            out_a = (np.stack(am) if am is not None
+                     else np.ones((n, h, w), dtype=np.float32)).astype(np.float32)
+            info.update({"grid_size": [gw, gh],
+                         "note": "passthrough (grid too small)"})
+            return (_to_tensor(out_rgb), torch.from_numpy(out_a), gw, gh,
+                    json.dumps(info))
+
+        gw, gh = new_w // s, new_h // s
+        small = np.empty((n, gh, gw, 3), dtype=np.uint8)
+        small_a = np.empty((n, gh, gw), dtype=np.float32)
+        for i in range(n):
+            crop = arr[i, oy:oy + new_h, ox:ox + new_w]
+            small[i] = _reduce_blocks(crop, s, reduce)
+            if am is not None:
+                a = am[i]
+                if a.shape != (h, w):
+                    from PIL import Image
+                    a = np.asarray(Image.fromarray((a * 255).astype(np.uint8))
+                                   .resize((w, h), Image.Resampling.NEAREST),
+                                   dtype=np.float32) / 255.0
+                acrop = a[oy:oy + new_h, ox:ox + new_w]
+                small_a[i] = (acrop.reshape(gh, s, gw, s).mean((1, 3)) > 0.5)
+            else:
+                small_a[i] = 1.0
+
+        out_rgb, out_a = small, small_a
+        if restore_size:
+            out_rgb = np.repeat(np.repeat(small, s, axis=1), s, axis=2)
+            out_a = np.repeat(np.repeat(small_a, s, axis=1), s, axis=2)
+
+        info.update({"grid_size": [gw, gh],
+                     "snapped_size": [new_w, new_h],
+                     "output_size": [int(out_rgb.shape[2]), int(out_rgb.shape[1])],
+                     "restore_size": bool(restore_size)})
+        print("[PixelForgeGridRecover] %s grid: %dpx block @ (%d,%d) -> "
+              "%dx%d true grid%s" % ("auto" if auto_detected else "manual",
+                                     s, ox, oy, gw, gh,
+                                     " (restored to %dx%d)" % (new_w, new_h)
+                                     if restore_size else ""))
+        return (_to_tensor(out_rgb), torch.from_numpy(out_a.astype(np.float32)),
+                gw, gh, json.dumps(info))
+
+
+NODE_CLASS_MAPPINGS = {"PixelForgeGridRecover": PixelForgeGridRecover}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "PixelForgeGridRecover": "Pixel Grid Recover (PixelForge)"}
