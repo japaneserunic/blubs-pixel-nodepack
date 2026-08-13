@@ -26,7 +26,7 @@ under `custom_nodes/`, modifies nothing else, and depends only on
 
    ```
    cd ComfyUI/custom_nodes
-   git clone https://github.com/<you>/blubs-pixel-nodepack.git
+   git clone https://github.com/japaneserunic/blubs-pixel-nodepack.git
    ```
 
    (Or download ZIP → extract → the folder must sit at
