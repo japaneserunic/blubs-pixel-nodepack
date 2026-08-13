@@ -1,5 +1,7 @@
 # ᛒᛚᚢᛒ - pixelNodepack + workflow
 
+*by ランラン - ᛒᛚᚢᛒ -Zeppelins or Bust*
+
 **blubs pixel nodes** — a ComfyUI custom node pack that turns **MiniMax H3** video
 output into real, game-ready **pixel-art sprite animations**: palette-locked frames,
 keyed alpha, anchored crops, loop trimming, sprite sheets, GIFs, and a headless
