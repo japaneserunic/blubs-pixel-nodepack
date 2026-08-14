@@ -64,8 +64,8 @@ _BACKGROUNDS = {
 
 _MOTION = {                 # (mode, threshold, commit_frames, max_hold)
     "Off": None,
-    "Light": ("hysteresis", 8.0, 2, 3),
-    "Strong": ("hysteresis", 14.0, 3, 4),
+    "Light": ("despike", 4.0, 1, 1),
+    "Strong": ("despike", 2.0, 1, 1),
 }
 
 _LOOPS = {
@@ -78,8 +78,9 @@ _ANCHORS = ["bottom_center", "center"]
 
 
 class PixelForgeSpriteStudio:
-    """One node, whole pipeline: grid recover -> motion fix -> background
-    removal -> pixel-art look -> crop/anchor -> loop trim -> dedup."""
+    """One node, whole pipeline: background removal (at full video res, where
+    the keyer can actually see) -> alpha-aware grid recover -> pixel-art look
+    -> despike motion fix -> crop/anchor -> loop trim -> dedup."""
 
     CATEGORY = "PixelForge/Easy"
     FUNCTION = "run"
@@ -124,7 +125,7 @@ class PixelForgeSpriteStudio:
                 "sharpen_grid": ("BOOLEAN", {"default": True,
                                  "tooltip": "Recovers the TRUE pixel grid the model rendered. Recommended on."}),
                 "motion_fix": (list(_MOTION.keys()), {"default": "Light",
-                               "tooltip": "Stops pixels crawling/flickering between frames."}),
+                               "tooltip": "Stops pixels crawling/flickering between frames. despike engine: only removes lone 1-frame blips, can never paint stale colors onto the moving sprite."}),
                 # ---- loop & timing ----
                 "loop_mode": (list(_LOOPS.keys()), {"default": "Auto seamless",
                               "tooltip": "Auto finds the best loop point; Ping-pong plays forward then backward."}),
@@ -145,7 +146,25 @@ class PixelForgeSpriteStudio:
             alpha=None, custom_palette_image=None):
         report = []
 
-        # ---- 1. grid recover ----
+        # ---- 1. background removal FIRST, at full video res ----
+        # The flood key needs real per-pixel color to tell backdrop gradient
+        # from sprite outline; after a block reduce that information is gone
+        # (measured 2026-08-13: grid-res key keeps either 556 px = eats the
+        # sprite, or 30k px = keys nothing; video-res key keeps the clean
+        # ~10k). Keyed backdrop can not bleed into edge pixels later because
+        # GridRecover's reduce is alpha-aware when the matte is wired.
+        if alpha is None:
+            key_color = custom_bg_hex if background == "custom hex" else _BACKGROUNDS[background]
+            tol, shadow = _KEY_STRENGTH[key_strength]
+            images, alpha = PixelForgeChromaKey().run(
+                images, key_color, tol, 0.0, True, "flood", shadow, True, 0.5, 1,
+                True, 2.0, True, 5.0)
+            report.append(f"key: {key_color} ({key_strength.lower()})")
+        else:
+            report.append("key: skipped (alpha wired in)")
+
+        # ---- 2. grid recover (alpha-aware: edge blocks take subject color
+        #         only, so no backdrop halo survives the reduce) ----
         src_grid = None
         if sharpen_grid:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
@@ -165,22 +184,7 @@ class PixelForgeSpriteStudio:
             tw, th = _SIZE_PRESETS[size_preset], _SIZE_PRESETS[size_preset]
         report.append(f"size: {tw}x{th if th else 'auto'}")
 
-        # ---- 2. motion fix ----
-        if _MOTION[motion_fix] is not None:
-            mode, thr, commit, hold = _MOTION[motion_fix]
-            images, alpha = PixelForgeTemporalStabilize().run(
-                images, mode, thr, commit, hold, alpha=alpha)
-            report.append(f"motion_fix: {motion_fix.lower()}")
-
-        # ---- 3. background removal ----
-        key_color = custom_bg_hex if background == "custom hex" else _BACKGROUNDS[background]
-        tol, shadow = _KEY_STRENGTH[key_strength]
-        images, alpha = PixelForgeChromaKey().run(
-            images, key_color, tol, 0.0, True, "flood", shadow, True, 0.5, 1,
-            True, 2.0, True, 5.0)
-        report.append(f"key: {key_color} ({key_strength.lower()})")
-
-        # ---- 4. pixel-art look ----
+        # ---- 3. pixel-art look ----
         dmode, dstrength = _DITHER[dither]
         palette_json = "{}"
         if look.startswith("Hi-bit"):
@@ -197,6 +201,15 @@ class PixelForgeSpriteStudio:
                            "Retro 16-bit": "retro_16bit",
                            "Hardcore 8-bit": "hardcore_8bit"}[look]
             p = dict(_STYLE_PRESETS[preset_name])
+            # This node always quantizes at the recovered art grid (1:1), so
+            # the preset flatten median prefilter runs at ART-PIXEL res where
+            # it eats 1px outlines and — worse — it filters RGB across the
+            # matte boundary, dragging keyed-out backdrop green INTO opaque
+            # edge pixels (the green-speck failure). The grid recover's
+            # trimmed-mean block reduce already killed the VAE grain flatten
+            # was designed for. Force it off here; the standalone Quantize
+            # node keeps it for video-res use.
+            p.update(flatten=0)
             if look == "Modern (smooth color)":
                 # fidelity mode: H3's own shading is already good pixel art -
                 # don't re-grade it (boosts shift hues), just snap to palette
@@ -215,6 +228,14 @@ class PixelForgeSpriteStudio:
                 p["flatten"], custom_palette_image=custom_palette_image,
                 alpha=alpha)
             report.append(f"look: {look.lower()}, palette: {palette}")
+
+        # ---- 4. motion fix (post-look, despike: zero-lag blip removal that
+        #         cannot eat the sprite; runs on the final palette + matte) ----
+        if _MOTION[motion_fix] is not None:
+            mode, thr, commit, hold = _MOTION[motion_fix]
+            images, alpha = PixelForgeTemporalStabilize().run(
+                images, mode, thr, commit, hold, alpha=alpha)
+            report.append(f"motion_fix: {motion_fix.lower()}")
 
         # ---- 5. crop & anchor ----
         images, alpha, crop_info = PixelForgeAutoCrop().run(

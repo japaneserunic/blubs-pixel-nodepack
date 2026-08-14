@@ -68,6 +68,36 @@ def _reduce_blocks(crop, s, mode):
     return _trimmed_mean(px, (12.0, 8.0)).round().astype(np.uint8).reshape(gh, gw, 3)
 
 
+def _reduce_blocks_masked(crop, amask, s, mode):
+    """Alpha-aware variant: each block's color comes from its OPAQUE pixels
+    only, so a keyed-out backdrop can never bleed into edge pixels (green
+    halo at the silhouette, muddy outlines). Blocks with no opaque pixel
+    fall back to the plain reduce (their alpha is 0; color is irrelevant).
+    'nearest' degrades to masked median when a mask is present: sampling the
+    block center would re-introduce keyed backdrop color exactly where the
+    subject covers most of the block.
+
+    Fast path: the plain vectorized reduce is correct for fully-opaque and
+    fully-transparent blocks; only MIXED blocks (the silhouette edge) get
+    the per-block masked trim."""
+    out = _reduce_blocks(crop, s, mode)
+    gh, gw = crop.shape[0] // s, crop.shape[1] // s
+    ss = s * s
+    am = amask.reshape(gh, s, gw, s).transpose(0, 2, 1, 3).reshape(gh, gw, ss) > 0.5
+    cnt = am.sum(-1)
+    mixed = (cnt > 0) & (cnt < ss)
+    if not mixed.any():
+        return out
+    blocks = crop.reshape(gh, s, gw, s, 3)
+    px = blocks.transpose(0, 2, 1, 3, 4).reshape(gh, gw, ss, 3).astype(np.float32)
+    widths = (8.0,) if mode in ("median", "nearest") else (12.0, 8.0)
+    ys, xs = np.nonzero(mixed)
+    for y, x in zip(ys, xs):
+        block = px[y, x][am[y, x]]
+        out[y, x] = _trimmed_mean(block[None, :, :], widths)[0].round()
+    return out
+
+
 class PixelForgeGridRecover:
     """Recover the TRUE pixel grid H3 rendered, before pixelizing.
 
@@ -172,7 +202,6 @@ class PixelForgeGridRecover:
         small_a = np.empty((n, gh, gw), dtype=np.float32)
         for i in range(n):
             crop = arr[i, oy:oy + new_h, ox:ox + new_w]
-            small[i] = _reduce_blocks(crop, s, reduce)
             if am is not None:
                 a = am[i]
                 if a.shape != (h, w):
@@ -181,8 +210,10 @@ class PixelForgeGridRecover:
                                    .resize((w, h), Image.Resampling.NEAREST),
                                    dtype=np.float32) / 255.0
                 acrop = a[oy:oy + new_h, ox:ox + new_w]
+                small[i] = _reduce_blocks_masked(crop, acrop, s, reduce)
                 small_a[i] = (acrop.reshape(gh, s, gw, s).mean((1, 3)) > 0.5)
             else:
+                small[i] = _reduce_blocks(crop, s, reduce)
                 small_a[i] = 1.0
 
         out_rgb, out_a = small, small_a
