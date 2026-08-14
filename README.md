@@ -69,8 +69,10 @@ Grab them from the same place you got your MiniMax H3 setup (see the H3 pack REA
 above for download links). Any H3-compatible checkpoint works — just reselect it in
 the loader nodes.
 
-**Workflow:** drag [`example_workflows/pixelforge_h3_sprite_v7.json`](example_workflows/pixelforge_h3_sprite_v7.json)
-into ComfyUI. If anything is missing, use *Manager → Install Missing Custom Nodes*.
+**Workflow:** drag [`example_workflows/pixelforge_h3_sprite_easy_v2.json`](example_workflows/pixelforge_h3_sprite_easy_v2.json)
+into ComfyUI — the **Easy v2** build: same H3 gen side, whole post chain condensed
+into 2 nodes. If anything is missing, use *Manager → Install Missing Custom Nodes*.
+Full-control variant: `pixelforge_h3_sprite_v7.json` (every knob exposed).
 Companion workflows: `pixelforge_h3_sprite_still_v2.json` (single sprite) and
 `pixelforge_h3_sprite_edit_v2.json` (edit an existing sprite via ref2va).
 
@@ -96,6 +98,31 @@ H3 (MiniMaxH3ImageToVideo / Director chain)
 **Order matters: grid recover & stabilize BEFORE key, and key BEFORE quantize.**
 Keying at full res gives a clean silhouette; the quantize node's premultiplied
 downscale then keeps backdrop color out of the sprite's edge pixels entirely.
+
+## ✨ Easy mode (v2) — the whole pipeline in 3 nodes
+
+Category `PixelForge/Easy`. Plain-language presets over the exact same engines
+(grid recover → motion fix → chroma key → quantize/TruePixel → crop → loop →
+dedup) — **zero copied code**, so fixes to the original nodes flow through
+automatically. The full node set is untouched; both coexist.
+
+- **✨ Sprite Studio (Easy v2)** — frames in, game-ready sprite run out, ONE node:
+  - **Sprite size** — Tiny 16 / Small 32 / Medium 64 / Large 128 / Huge 256 / Custom.
+    No more hunting `pixel_width` across three nodes.
+  - **Look** — Modern / Retro 16-bit / Hardcore 8-bit / Hi-bit cel shading / Hi-bit clean
+  - **Palette** — auto from sprite, any built-in retro palette, or custom image +
+    a simple "how many colors" slider
+  - **Dither** — Off / Light / Medium / Strong · **Cleanup** — one 0–3 slider
+  - **Background** — auto-detect / green / blue / magenta / black / white / custom hex,
+    with Gentle / Normal / Aggressive strength
+  - **Motion fix (crawl killer)** — Off / Light / Strong
+  - **Loop** — Auto seamless / Ping-pong / Keep all frames, dedup toggle, anchor pick
+- **📦 Sprite Export (Easy v2)** — GIF (1x/2x/4x/8x preview size), sprite sheet,
+  optional Aseprite build. Set a name, hit run.
+- **💬 H3 Sprite Prompt (Easy v2)** — 4 fields: character, action, style, seconds.
+  Wire `h3_prompt` + `length_frames` straight into `MiniMaxH3ImageToVideo`.
+
+Bundled as `example_workflows/pixelforge_h3_sprite_easy_v2.json`.
 
 ## Nodes (category `PixelForge/*`)
 

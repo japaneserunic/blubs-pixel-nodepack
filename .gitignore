@@ -3,3 +3,4 @@ __pycache__/
 *.bak*
 _e2e_out/
 _*.py
+!__init__.py
