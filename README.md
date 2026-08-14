@@ -107,8 +107,9 @@ dedup) — **zero copied code**, so fixes to the original nodes flow through
 automatically. The full node set is untouched; both coexist.
 
 - **✨ Sprite Studio (Easy v2)** — frames in, game-ready sprite run out, ONE node:
-  - **Sprite size** — Tiny 16 / Small 32 / Medium 64 / Large 128 / Huge 256 / Custom.
-    No more hunting `pixel_width` across three nodes.
+  - **Sprite size** — **Source (H3's own grid)** keeps the exact art grid H3
+    rendered: 1:1, crispest, the default. Tiny 16 / Small 32 / Medium 64 /
+    Large 128 / Huge 256 / Custom only when you need fixed game-ready dims.
   - **Look** — Modern / Retro 16-bit / Hardcore 8-bit / Hi-bit cel shading / Hi-bit clean
   - **Palette** — auto from sprite, any built-in retro palette, or custom image +
     a simple "how many colors" slider

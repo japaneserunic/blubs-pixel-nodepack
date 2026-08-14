@@ -22,6 +22,7 @@ from .pf_aseprite import PixelForgeAsepriteExport, PixelForgeSaveGIF
 from .pf_h3 import PixelForgeH3Prompt
 
 _SIZE_PRESETS = {
+    "Source (H3's own grid)": -1,
     "Tiny (16 px)": 16,
     "Small (32 px)": 32,
     "Medium (64 px)": 64,
@@ -94,8 +95,8 @@ class PixelForgeSpriteStudio:
             "required": {
                 "images": ("IMAGE",),
                 # ---- sprite size ----
-                "size_preset": (list(_SIZE_PRESETS.keys()), {"default": "Medium (64 px)",
-                                "tooltip": "Final sprite resolution in art pixels. This is THE size of your sprite."}),
+                "size_preset": (list(_SIZE_PRESETS.keys()), {"default": "Source (H3's own grid)",
+                                "tooltip": "Final sprite resolution in art pixels. Source = keep the exact grid H3 rendered (crispest, 1:1, recommended). Pick a fixed size only for game-ready dimensions."}),
                 "custom_width": ("INT", {"default": 64, "min": 8, "max": 2048, "step": 8,
                                  "tooltip": "Only used when size_preset = Custom size."}),
                 "custom_height": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 8,
@@ -108,8 +109,8 @@ class PixelForgeSpriteStudio:
                              "tooltip": "Fixed retro palette, or let the node pick colors from your sprite."}),
                 "colors": ("INT", {"default": 32, "min": 2, "max": 256,
                            "tooltip": "How many colors 'auto' may use. Fewer = more retro."}),
-                "dither": (list(_DITHER.keys()), {"default": "Light",
-                           "tooltip": "Dithering = fake shading with pixel patterns. Off is cleanest."}),
+                "dither": (list(_DITHER.keys()), {"default": "Off",
+                           "tooltip": "Dithering = fake shading with pixel patterns. Off is cleanest (recommended at Source size)."}),
                 "cleanup": ("INT", {"default": 1, "min": 0, "max": 3,
                             "tooltip": "Removes lonely stray pixels. Higher = more aggressive."}),
                 # ---- background removal ----
@@ -144,18 +145,25 @@ class PixelForgeSpriteStudio:
             alpha=None, custom_palette_image=None):
         report = []
 
-        # ---- resolve size ----
-        if size_preset == "Custom size":
-            tw, th = custom_width, custom_height
-        else:
-            tw, th = _SIZE_PRESETS[size_preset], _SIZE_PRESETS[size_preset]
-        report.append(f"size: {tw}x{th if th else 'auto'}")
-
         # ---- 1. grid recover ----
+        src_grid = None
         if sharpen_grid:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
                 images, "auto", 4, 12, "median", False, alpha=alpha)
             report.append(f"grid: {gw}x{gh}")
+            src_grid = (gw, gh)
+
+        # ---- resolve size (after grid recover: Source uses the true grid) ----
+        if size_preset == "Custom size":
+            tw, th = custom_width, custom_height
+        elif _SIZE_PRESETS[size_preset] < 0:
+            if src_grid is not None:
+                tw, th = src_grid  # 1:1 with the grid H3 actually rendered
+            else:
+                tw, th = images.shape[2], images.shape[1]  # no grid: snap at native res
+        else:
+            tw, th = _SIZE_PRESETS[size_preset], _SIZE_PRESETS[size_preset]
+        report.append(f"size: {tw}x{th if th else 'auto'}")
 
         # ---- 2. motion fix ----
         if _MOTION[motion_fix] is not None:
@@ -188,7 +196,11 @@ class PixelForgeSpriteStudio:
             preset_name = {"Modern (smooth color)": "modern_hibit",
                            "Retro 16-bit": "retro_16bit",
                            "Hardcore 8-bit": "hardcore_8bit"}[look]
-            p = _STYLE_PRESETS[preset_name]
+            p = dict(_STYLE_PRESETS[preset_name])
+            if look == "Modern (smooth color)":
+                # fidelity mode: H3's own shading is already good pixel art -
+                # don't re-grade it (boosts shift hues), just snap to palette
+                p.update(saturation=1.0, contrast=1.0, sharpen=0.0)
             if palette == "auto (from sprite)":
                 palette_mode, fixed_palette = "adaptive", PALETTE_NAMES[0]
             elif palette == "use custom image":
@@ -197,7 +209,7 @@ class PixelForgeSpriteStudio:
                 palette_mode, fixed_palette = "fixed", palette
             use_colors = colors if palette_mode != "fixed" else p["colors"]
             images, palette_json, alpha = PixelForgeQuantize().run(
-                images, tw, th, "area", "custom", palette_mode, "kmeans",
+                images, tw, th, "nearest", "custom", palette_mode, "kmeans",
                 fixed_palette, use_colors, "lab", dmode, dstrength, True,
                 cleanup, p["saturation"], p["contrast"], p["sharpen"], 1,
                 p["flatten"], custom_palette_image=custom_palette_image,

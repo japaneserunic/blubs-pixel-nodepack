@@ -1,5 +1,5 @@
 {
-  "id": "b84ee465-0977-438a-9c71-658b580e13ce",
+  "id": "77bc93ac-1ab5-452e-b2fe-a5f575182ed4",
   "revision": 0,
   "last_node_id": 304,
   "last_link_id": 318,
@@ -1651,13 +1651,13 @@
         "Node name for S&R": "PixelForgeSpriteStudio"
       },
       "widgets_values": [
-        "Medium (64 px)",
+        "Source (H3's own grid)",
         64,
         0,
         "Modern (smooth color)",
         "auto (from sprite)",
         32,
-        "Light",
+        "Off",
         1,
         "auto (detect)",
         "#00FF00",
