@@ -76,6 +76,15 @@ Full-control variant: `pixelforge_h3_sprite_v7.json` (every knob exposed).
 Companion workflows: `pixelforge_h3_sprite_still_v2.json` (single sprite) and
 `pixelforge_h3_sprite_edit_v2.json` (edit an existing sprite via ref2va).
 
+**De-rope variant:** `pixelforge_h3_derope_v1.json` takes a clip you've *already
+generated* and re-renders its fast-motion smear sharp before pixelizing
+(H3 collapses fast poses into one latent token = mushy limbs at sprite res).
+Requires [ComfyUI-MAINodes](https://github.com/matlowai/ComfyUI-MAINodes)
+(Motion Lab) and [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes)
+alongside this pack. Point LoadVideo at your clip, match the aspect in the
+Resolution Selector, describe the clip in the prompt (keep the sharpness
+clause), queue.
+
 ## The pipeline
 
 ```
