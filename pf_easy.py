@@ -135,14 +135,15 @@ class PixelForgeSpriteStudio:
                 # ---- motion & grid ----
                 "sharpen_grid": ("BOOLEAN", {"default": True,
                                  "tooltip": "Recovers the TRUE pixel grid the model rendered. Recommended on."}),
-                "motion_fix": (list(_MOTION.keys()), {"default": "Strong",
-                               "tooltip": "Stops pixels crawling/flickering between frames. Strong (recommended): "
-                                          "despike + a minimum-hold rule on the silhouette — 1-2 frame edge "
-                                          "wobble dies and re-pinned pixels keep their real color (never flash "
-                                          "black), with zero lag and no risk to real motion. Extra strong = "
-                                          "also locks pixels the source says are static to their dominant "
-                                          "color (kills interior shimmer too). Light = only lone 1-frame "
-                                          "blips. Smooth shading = temporal median on interior pixels."}),
+                "motion_fix": (list(_MOTION.keys()), {"default": "Extra strong",
+                               "tooltip": "Stops pixels crawling/flickering between frames. Extra strong "
+                                          "(recommended): pixels the source says are static lock to one "
+                                          "shade — kills interior shimmer AND the shading-boundary wobble "
+                                          "where H3 jitters a light/dark edge across an art pixel; the "
+                                          "winner shade is picked by neighborhood vote so regions stay "
+                                          "coherent. Strong = 1-2 frame edge wobble dies, re-pinned pixels "
+                                          "keep their real color (never flash black). Light = only lone "
+                                          "1-frame blips. Smooth shading = temporal median on interior pixels."}),
                 # ---- loop & timing ----
                 "loop_mode": (list(_LOOPS.keys()), {"default": "Auto seamless",
                               "tooltip": "Auto finds the best loop point; Ping-pong plays forward then backward."}),

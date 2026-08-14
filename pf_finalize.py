@@ -651,7 +651,8 @@ class PixelForgeTruePixel:
         quant = []
         for idx in idx_maps:
             if despeckle > 0:
-                idx = _despeckle(idx.astype(np.int32), despeckle)
+                idx = _despeckle(idx.astype(np.int32), despeckle,
+                                 pal=full_pal_u8)
             quant.append(Image.fromarray(
                 full_pal_u8[idx.clip(0, len(full_pal_u8) - 1)], "RGB"))
 

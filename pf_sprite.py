@@ -265,7 +265,9 @@ class PixelForgeChromaKey:
                                             "tooltip": "Drop opaque components DETACHED from the main subject when "
                                                        "smaller than this % of the largest component (painted ground "
                                                        "shadows, floating debris the key can't match). 0 = off. "
-                                                       "The largest component is always kept."}),
+                                                       "The largest component is always kept. Limb rescue: a small "
+                                                       "detached component whose color is well-represented in the "
+                                                       "main subject (an amputated boot/hand) is kept, not dropped."}),
             },
         }
 
@@ -309,9 +311,24 @@ class PixelForgeChromaKey:
                     tight = _key_candidates(arr[i], key,
                                             tolerance * interior_tolerance,
                                             shadow_tolerance)
-                    fulls[i] = voted[i] | (fulls[i] & tight)
+                    # SYMMETRIC GUARD: the vote may only govern WEAK px
+                    # (the blended silhouette edge = the crawl). A px that
+                    # is strongly NOT backdrop this frame — fails the
+                    # candidate test even at 2x tolerance (navy boots, white
+                    # suit) — can not be voted transparent. H3 paints green
+                    # spill onto boots/gloves in some frames; without this
+                    # guard the vote spreads that keying into the clean
+                    # frames (the 'occlusion chunk' eater, measured 2026-08-14:
+                    # 193k subject-colored px keyed with the unguarded vote
+                    # vs 59k with the vote off, Gentle key, H3_00600).
+                    strong_fg = ~_key_candidates(arr[i], key,
+                                                 min(1.0, tolerance * 2.0),
+                                                 shadow_tolerance)
+                    fulls[i] = (voted[i] & ~strong_fg) | \
+                               (fulls[i] & (tight | strong_fg))
             alpha = np.empty((n, h, w), dtype=np.float32)
             dropped_total = 0
+            rescued_total = 0
             for i in range(n):
                 a = ~fulls[i]
                 if matte_erode > 0 and a.any():
@@ -321,16 +338,36 @@ class PixelForgeChromaKey:
                     if nl > 1:
                         sizes = np.asarray(ndimage.sum_labels(
                             a, lbl, range(1, nl + 1)))
-                        largest = float(sizes.max())
+                        main_id = 1 + int(np.argmax(sizes))
+                        largest = float(sizes[main_id - 1])
+                        main_lab = _rgb_to_lab(arr[i][lbl == main_id])
                         keep = np.zeros(nl + 1, dtype=bool)
                         keep[0] = False
+                        rescued = 0
                         for k in range(nl):
                             if sizes[k] >= largest * drop_detached / 100.0:
                                 keep[k + 1] = True
+                                continue
+                            # LIMB RESCUE: an amputated extremity (a boot
+                            # severed by a 1-2px keyed ankle bridge) shares
+                            # its color with the rest of the subject (same
+                            # navy as the gloves/helmet); painted ground
+                            # shadows and debris do not. Rescue a detached
+                            # comp whose median color is well-represented
+                            # inside the main component.
+                            comp = lbl == (k + 1)
+                            med = np.median(arr[i][comp], axis=0)
+                            med_lab = _rgb_to_lab(med.reshape(1, 3))[0]
+                            d = np.sqrt(((main_lab - med_lab) ** 2).sum(-1))
+                            if int((d < 18.0).sum()) >= max(
+                                    20, int(0.001 * main_lab.shape[0])):
+                                keep[k + 1] = True
+                                rescued += int(sizes[k])
                         drop = (lbl > 0) & ~keep[lbl]
                         if drop.any():
                             dropped_total += int(drop.sum())
                             a = a & ~drop
+                        rescued_total += rescued
                 af = a.astype(np.float32)
                 if softness > 0.0:
                     af = np.clip(ndimage.gaussian_filter(af, sigma=softness * 8.0), 0, 1)
@@ -339,6 +376,10 @@ class PixelForgeChromaKey:
                 print("[PixelForgeChromaKey] drop_detached: removed %d "
                       "detached px across %d frames (min %.1f%% of main "
                       "subject)" % (dropped_total, n, drop_detached))
+            if rescued_total:
+                print("[PixelForgeChromaKey] limb rescue: kept %d detached "
+                      "px whose color matches the main subject (amputated "
+                      "extremities, not debris)" % rescued_total)
         else:
             dist = np.sqrt(((arr - key.reshape(1, 1, 1, 3)) ** 2).sum(-1)) / 255.0
             tol = tolerance

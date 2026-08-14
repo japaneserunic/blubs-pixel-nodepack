@@ -385,6 +385,7 @@ def _movelock(src, out, alpha=None, src_thr=12.0):
     k = (out[..., 0].astype(np.int32) << 16) | \
         (out[..., 1].astype(np.int32) << 8) | out[..., 2].astype(np.int32)
     uniq, inv = np.unique(k, return_inverse=True)   # inv (N,H,W) -> uniq idx
+    n_bistable = 0
     if len(uniq) <= 512:
         npix = k.size // n
         counts = np.zeros((len(uniq), npix), dtype=np.int32)
@@ -395,7 +396,6 @@ def _movelock(src, out, alpha=None, src_thr=12.0):
         np.add.at(counts, (inv.reshape(n, npix).T,
                            np.arange(npix).reshape(-1, 1)),
                   votes)                             # per-px color histogram
-        mode_idx = uniq[counts.argmax(0)].reshape(k.shape[1:])
         # CONSISTENCY GATE: lock a pixel to its mode color only when that
         # color clearly dominates its opaque frames. Shimmer (A A B A C A)
         # has a dominant mode and dies; genuinely repainted shading
@@ -407,6 +407,57 @@ def _movelock(src, out, alpha=None, src_thr=12.0):
         share = (counts.max(0) / np.maximum(total_votes, 1.0)
                  ).reshape(k.shape[1:])
         gate = share >= 0.6
+        # SHADING-LOCK (autopsy 2026-08-14, H3_00596 knight): H3 repaints
+        # shading on static regions through a RAMP of 3-5 palette colors in
+        # 2-4 frame runs — no dominant mode (60% gate misses it), not
+        # bi-stable (top-2 coverage < 85%), and every swing is decisive
+        # (despike, minrun and sticky labels are all blind to it). A pixel
+        # artist holds ONE shade where the pose doesn't change, so: any
+        # pixel whose run is covered (>=80% of opaque votes) by a FEW (<=4)
+        # recurring colors (each present >=15% of its opaque frames) is
+        # shading flicker, not content — lock it to ONE of its own
+        # recurring colors. The winner is chosen by relaxation: 3 passes of
+        # neighborhood vote restricted to each pixel's own candidate set,
+        # so locked regions converge to spatially coherent shades instead
+        # of salt-and-peppering (the per-pixel-mode 'way bad' regression).
+        # Truly chaotic pixels (no few-color coverage) still fall through
+        # to despike.
+        #
+        # Why 70%/top-4 and not stricter: the classic case is a shading
+        # BOUNDARY wobbling by a few video px frame-to-frame — the 12x12
+        # neighborhood is stable (range ~25) while the straddled art pixel
+        # swings ~105, splitting its votes fairly evenly across a 3-4 color
+        # ramp (top-4 coverage ~70%). Stricter gates let exactly the worst
+        # offenders through (measured on H3_00596 px 119,55).
+        win_idx = counts.argmax(0)
+        npix = counts.shape[1]
+        srt = np.sort(counts, axis=0)[::-1]              # descending per px
+        k4 = srt[min(3, len(uniq) - 1)].astype(np.float32)
+        cand_thr = np.maximum(0.10 * total_votes, k4)
+        cand_mask = counts >= cand_thr[None, :]
+        cov = np.where(cand_mask, counts, 0).sum(0) / \
+            np.maximum(total_votes, 1.0)
+        lock2d = ((cov >= 0.70) & (total_votes >= 3)).reshape(k.shape[1:])
+        final_idx = win_idx.reshape(k.shape[1:]).copy()
+        lock_flat = lock2d.reshape(-1)
+        col_arange = np.arange(npix)
+        for _pass in range(3):
+            vote = np.zeros((len(uniq), npix), dtype=np.int32)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    nw = np.roll(final_idx, (dy, dx), (0, 1)).reshape(-1)
+                    nb = np.roll(lock2d, (dy, dx), (0, 1)
+                                 ).reshape(-1).astype(np.int32)
+                    np.add.at(vote, (nw, col_arange), nb)
+            vote *= cand_mask                        # own candidates only
+            best = vote.argmax(0)
+            upd = lock_flat & (vote.max(0) > 0)
+            final_idx.reshape(-1)[upd] = best[upd]
+        gate = lock2d
+        n_bistable = int((lock2d & ~(share >= 0.6)).sum())
+        mode_idx = uniq[final_idx.reshape(-1)].reshape(k.shape[1:])
     else:                                            # pathological palette
         mode_idx = np.sort(k, axis=0)[n // 2]        # median-label fallback
         gate = np.zeros(k.shape[1:], dtype=bool)
@@ -440,9 +491,9 @@ def _movelock(src, out, alpha=None, src_thr=12.0):
                                            mode_rgb, res[t - 1])
                         res[t][repin] = src_rgb[repin]
     print("[PixelForgeTemporalStabilize] movelock: %d static px (%d "
-          "color-locked, gate=mode>=60%%), %d px-frames rewritten, "
+          "shade-locked, %d beyond 60%%-mode), %d px-frames rewritten, "
           "src_thr=%.1f" % (int(static.sum()), int(lockable.sum()),
-                            locked_px, src_thr))
+                            n_bistable, locked_px, src_thr))
     if alpha is not None:
         return res, res_a
     return res

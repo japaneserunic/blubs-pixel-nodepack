@@ -301,12 +301,24 @@ def _map_frames(frames, pal_rgb, space, dither, dither_strength,
     return out, maps
 
 
-def _despeckle(idx, passes):
+def _despeckle(idx, passes, pal=None, max_dist=30.0):
     """Majority filter: replace pixels that share a color with NONE of their
     8 neighbors with the dominant neighbor color. The classic 'orphan pixel'
-    cleanup that makes AI output read as hand-placed pixel art."""
+    cleanup that makes AI output read as hand-placed pixel art.
+
+    COLOR GATE (pal + max_dist): the swap only happens when the dominant
+    neighbor color is within max_dist (Lab) of the orphan's own color.
+    Without the gate an anti-aliased light edge pixel surrounded by the dark
+    outline gets repainted near-black (and vice versa) — and because the
+    orphan pattern shifts every frame, those violent swaps read as
+    black<->color edge flicker (measured 2026-08-14 on H3_00598: cleanup=1
+    ungated = 293 black-flicker px, cleanup=0 = 6; gated keeps cleanup for
+    genuinely ambiguous same-ish orphans while the violent swaps die)."""
     if passes <= 0:
         return idx
+    lab = None
+    if pal is not None:
+        lab = _rgb_to_lab(np.asarray(pal, dtype=np.float32).reshape(-1, 3))
     idx = idx.astype(np.int32)
     for _ in range(passes):
         h, w = idx.shape
@@ -334,6 +346,11 @@ def _despeckle(idx, passes):
             vote = np.where(take, c, vote)
             best_val = np.where(take, nb, best_val)
         isolated = (counts == 0) & (vote > 0)
+        if lab is not None:
+            own = lab[np.clip(idx, 0, len(lab) - 1)]
+            best = lab[np.clip(best_val, 0, len(lab) - 1)]
+            dist = ((own - best) ** 2).sum(-1) ** 0.5
+            isolated &= dist <= max_dist
         if not isolated.any():
             break
         idx = np.where(isolated, best_val, idx)
@@ -551,7 +568,7 @@ class PixelForgeQuantize:
             pal = np.array(pal_rgb, dtype=np.uint8)
             quant = []
             for idx in idx_maps:
-                idx = _despeckle(idx, despeckle)
+                idx = _despeckle(idx, despeckle, pal=pal)
                 quant.append(Image.fromarray(pal[idx.clip(0, len(pal) - 1)], "RGB"))
 
         if upscale_factor == 0:
