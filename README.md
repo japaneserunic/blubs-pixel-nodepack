@@ -85,6 +85,11 @@ alongside this pack. Point LoadVideo at your clip, match the aspect in the
 Resolution Selector, describe the clip in the prompt (keep the sharpness
 clause), queue.
 
+**De-rope T2V variant:** `pixelforge_h3_derope_t2v_v1.json` is the one-queue
+production flow: prompt -> baseline gen -> oracle -> re-denoise -> recover ->
+sprite. Same MAINodes/KJNodes dependency; write your prompt in BOTH
+MiniMaxH3ImageToVideo nodes (pass 1 + pass 2 must match).
+
 ## The pipeline
 
 ```
