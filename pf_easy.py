@@ -304,6 +304,25 @@ class PixelForgeEasyExport:
             sheet_columns, sheet_bg, build_aseprite, aseprite_path,
             alpha=None, durations_json=None):
         report = []
+        ui_images = []
+        ui_animated = None
+
+        def _collect(r):
+            # SaveGIF/AsepriteExport return {"ui": ..., "result": (report,)} —
+            # propagate the ui payload so the preview shows ON this node
+            # instead of being dropped (and don't stringify the dict into
+            # the report text).
+            nonlocal ui_animated
+            if isinstance(r, dict):
+                rep = r.get("result", ("",))
+                report.append(rep[0] if isinstance(rep, (tuple, list))
+                              else str(rep))
+                ui = r.get("ui") or {}
+                ui_images.extend(ui.get("images", []))
+                if ui.get("animated"):
+                    ui_animated = ui["animated"]
+            else:
+                report.append(r[0] if isinstance(r, (tuple, list)) else str(r))
 
         sheet = images  # passthrough if sheet disabled
         if make_sheet:
@@ -317,15 +336,19 @@ class PixelForgeEasyExport:
             r = PixelForgeSaveGIF().run(
                 images, filename_prefix, fps, True, scale, True,
                 alpha=alpha, durations_json=durations_json)
-            report.append(r[0] if isinstance(r, (tuple, list)) else str(r))
+            _collect(r)
 
         if build_aseprite:
             r = PixelForgeAsepriteExport().run(
                 images, filename_prefix, "run", fps, True, aseprite_path,
                 alpha=alpha, durations_json=durations_json)
-            report.append(r[0] if isinstance(r, (tuple, list)) else str(r))
+            _collect(r)
 
-        return (images, sheet, " | ".join(report))
+        result = (images, sheet, " | ".join(report))
+        ui = {"images": ui_images}
+        if ui_animated:
+            ui["animated"] = ui_animated
+        return {"ui": ui, "result": result}
 
 
 class PixelForgeEasyPrompt:
