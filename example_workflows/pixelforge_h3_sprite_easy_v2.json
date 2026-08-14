@@ -1663,10 +1663,17 @@
         "#00FF00",
         "Normal",
         true,
-        "Light",
+        "Strong",
         "Auto seamless",
         true,
-        "bottom_center"
+        "bottom_center",
+        "Fixed square",
+        200,
+        200,
+        200,
+        "center",
+        0,
+        0
       ],
       "title": "PF Easy: Sprite Studio (whole pipeline)"
     },

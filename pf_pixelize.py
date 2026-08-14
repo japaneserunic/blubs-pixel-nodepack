@@ -237,12 +237,44 @@ def _nearest_palette_map(px, palette, space="rgb"):
     return idx.reshape(h, w)
 
 
-def _map_frames(frames, pal_rgb, space, dither, dither_strength):
-    """Map PIL frames onto pal_rgb. Returns (frames_rgb, index_maps)."""
+def _sticky_palette_map(px, palette, space, prev_idx, margin):
+    """Nearest-palette mapping with temporal hysteresis: a pixel keeps last
+    frame's palette entry unless the new nearest color is decisively closer
+    (by `margin` in squared-distance ratio). Kills palette-boundary shimmer —
+    whole shade regions flip-flopping between two palette entries frame to
+    frame because the source wobbles across the boundary — WITHOUT holding
+    stale colors: real content changes are decisive in distance and switch
+    the same frame (no commit/hold lag, this is not the old hysteresis)."""
+    if space == "lab":
+        px = _rgb_to_lab(px)
+        palette = _rgb_to_lab(palette)
+    h, w, _ = px.shape
+    flat = px.reshape(-1, 3)
+    prev_flat = prev_idx.reshape(-1).astype(np.int64)
+    idx = np.empty(flat.shape[0], dtype=np.uint8)
+    chunk = 65536
+    for s in range(0, flat.shape[0], chunk):
+        d = ((flat[s:s + chunk, None, :] - palette[None, :, :]) ** 2).sum(-1)
+        nearest = d.argmin(-1)
+        rows = np.arange(len(nearest))
+        d_near = d[rows, nearest]
+        d_prev = d[rows, prev_flat[s:s + chunk]]
+        keep = d_prev <= d_near * (1.0 + margin)
+        idx[s:s + chunk] = np.where(
+            keep, prev_flat[s:s + chunk], nearest).astype(np.uint8)
+    return idx.reshape(h, w)
+
+
+def _map_frames(frames, pal_rgb, space, dither, dither_strength,
+                temporal_margin=0.0):
+    """Map PIL frames onto pal_rgb. Returns (frames_rgb, index_maps).
+    temporal_margin > 0 enables sticky labels (see _sticky_palette_map);
+    floyd_steinberg stays on PIL's path and skips stickiness."""
     pal = np.array(pal_rgb, dtype=np.float32)
     out, maps = [], []
     fs = (dither == "floyd_steinberg")
     pal_img = _build_fixed_pal_image(pal_rgb) if fs else None
+    prev_idx = None
     for f in frames:
         if fs:
             # error diffusion stays on PIL's fast C path (RGB space);
@@ -259,7 +291,11 @@ def _map_frames(frames, pal_rgb, space, dither, dither_strength):
             tiled = np.tile(matrix, (h // kk + 1, w // kk + 1))[:h, :w]
             px = np.clip(px + (tiled - 0.5)[:, :, None] * 96.0 * dither_strength,
                          0, 255)
-        idx = _nearest_palette_map(px, pal, space)
+        if temporal_margin > 0.0 and prev_idx is not None:
+            idx = _sticky_palette_map(px, pal, space, prev_idx, temporal_margin)
+        else:
+            idx = _nearest_palette_map(px, pal, space)
+        prev_idx = idx
         maps.append(idx)
         out.append(Image.fromarray(pal[idx].astype(np.uint8), "RGB"))
     return out, maps
@@ -409,6 +445,10 @@ class PixelForgeQuantize:
                 "flatten": ("INT", {"default": 3, "min": 0, "max": 7, "step": 2,
                                     "tooltip": "Median denoise at SOURCE resolution, before downscale. "
                                                "Kills VAE grain -> flat color regions -> much less mud. 0 = off."}),
+                "temporal_lock": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.9, "step": 0.05,
+                                            "tooltip": "Sticky palette labels: a pixel keeps last frame's color unless the "
+                                                       "new match is decisively closer. Kills shade-region shimmer/flip-flop "
+                                                       "between frames. 0 = off. No lag, real motion still switches instantly."}),
             },
             "optional": {
                 "custom_palette_image": ("IMAGE", {"tooltip": "Palette source image when palette_mode=custom_image."}),
@@ -421,7 +461,8 @@ class PixelForgeQuantize:
     def run(self, images, pixel_width, pixel_height, downsample_filter, style_preset,
             palette_mode, palette_method, fixed_palette, colors, mapping_space,
             dither, dither_strength, shared_palette, despeckle, saturation,
-            contrast, sharpen, upscale_factor, flatten=3, custom_palette_image=None,
+            contrast, sharpen, upscale_factor, flatten=3, temporal_lock=0.35,
+            custom_palette_image=None,
             alpha=None):
         frames = _tensor_to_pil_list(images)
         src_w, src_h = frames[0].size
@@ -503,7 +544,8 @@ class PixelForgeQuantize:
             pal_rgb = _merge_palette(pal_rgb)
 
         quant, idx_maps = _map_frames(small, pal_rgb, mapping_space, dither,
-                                      dither_strength)
+                                      dither_strength,
+                                      temporal_margin=temporal_lock)
 
         if despeckle > 0:
             pal = np.array(pal_rgb, dtype=np.uint8)

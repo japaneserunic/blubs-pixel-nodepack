@@ -10,6 +10,9 @@ Nodes (category PixelForge/Easy):
   - H3 Sprite Prompt (Easy v2): minimal prompt builder (subject/action/style/seconds)
 """
 
+import numpy as np
+import torch
+
 from .pf_palettes import PALETTE_NAMES
 from .pf_pixelize import PixelForgeQuantize, _STYLE_PRESETS
 from .pf_sprite import (PixelForgeAutoCrop, PixelForgeChromaKey,
@@ -65,8 +68,16 @@ _BACKGROUNDS = {
 _MOTION = {                 # (mode, threshold, commit_frames, max_hold)
     "Off": None,
     "Light": ("despike", 4.0, 1, 1),
-    "Strong": ("despike", 2.0, 1, 1),
+    "Strong": ("despike_matte", 4.0, 1, 1),
+    "Extra strong": ("movelock", 20.0, 1, 1),
+    "Smooth shading": ("median3_inner", 10.0, 2, 3),
 }
+
+_PLACEMENTS = ["center", "top_center", "bottom_center",
+               "left_center", "right_center",
+               "top_left", "top_right", "bottom_left", "bottom_right"]
+
+_CANVAS = ["Tight (crop to sprite)", "Fixed square", "Fixed custom"]
 
 _LOOPS = {
     "Auto seamless": "auto",
@@ -124,15 +135,38 @@ class PixelForgeSpriteStudio:
                 # ---- motion & grid ----
                 "sharpen_grid": ("BOOLEAN", {"default": True,
                                  "tooltip": "Recovers the TRUE pixel grid the model rendered. Recommended on."}),
-                "motion_fix": (list(_MOTION.keys()), {"default": "Light",
-                               "tooltip": "Stops pixels crawling/flickering between frames. despike engine: only removes lone 1-frame blips, can never paint stale colors onto the moving sprite."}),
+                "motion_fix": (list(_MOTION.keys()), {"default": "Strong",
+                               "tooltip": "Stops pixels crawling/flickering between frames. Strong (recommended): "
+                                          "despike + a minimum-hold rule on the silhouette — 1-2 frame edge "
+                                          "wobble dies and re-pinned pixels keep their real color (never flash "
+                                          "black), with zero lag and no risk to real motion. Extra strong = "
+                                          "also locks pixels the source says are static to their dominant "
+                                          "color (kills interior shimmer too). Light = only lone 1-frame "
+                                          "blips. Smooth shading = temporal median on interior pixels."}),
                 # ---- loop & timing ----
                 "loop_mode": (list(_LOOPS.keys()), {"default": "Auto seamless",
                               "tooltip": "Auto finds the best loop point; Ping-pong plays forward then backward."}),
                 "remove_duplicate_frames": ("BOOLEAN", {"default": True,
                                             "tooltip": "Merges held frames and records real frame durations (game engines love this)."}),
                 "anchor": (_ANCHORS, {"default": "bottom_center",
-                           "tooltip": "Where the sprite stands in its frame. bottom_center = feet planted, no jitter."}),
+                           "tooltip": "Tight canvas only: where the sprite stands in its frame. bottom_center = feet planted, no jitter."}),
+                # ---- canvas (v3 widgets appended; old workflows unaffected) ----
+                "canvas": (_CANVAS, {"default": "Tight (crop to sprite)",
+                            "tooltip": "Tight = canvas hugs the sprite. Fixed = exact artist canvas (e.g. 200x200) "
+                                       "with the sprite placed inside — how real sprite assets ship."}),
+                "canvas_size": ("INT", {"default": 200, "min": 16, "max": 2048, "step": 8,
+                                "tooltip": "Fixed square: canvas is canvas_size x canvas_size art pixels."}),
+                "canvas_width": ("INT", {"default": 200, "min": 8, "max": 2048, "step": 8,
+                                 "tooltip": "Fixed custom: exact canvas width."}),
+                "canvas_height": ("INT", {"default": 200, "min": 8, "max": 2048, "step": 8,
+                                  "tooltip": "Fixed custom: exact canvas height."}),
+                "placement": (_PLACEMENTS, {"default": "center",
+                              "tooltip": "Fixed canvas: where the sprite sits. If it overflows, it crops "
+                                         "symmetrically from this anchor."}),
+                "offset_x": ("INT", {"default": 0, "min": -1024, "max": 1024,
+                             "tooltip": "Fixed canvas: nudge sprite right (+) / left (-) in art pixels."}),
+                "offset_y": ("INT", {"default": 0, "min": -1024, "max": 1024,
+                             "tooltip": "Fixed canvas: nudge sprite down (+) / up (-) in art pixels."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -143,6 +177,8 @@ class PixelForgeSpriteStudio:
     def run(self, images, size_preset, custom_width, custom_height, look, palette,
             colors, dither, cleanup, background, custom_bg_hex, key_strength,
             sharpen_grid, motion_fix, loop_mode, remove_duplicate_frames, anchor,
+            canvas="Tight (crop to sprite)", canvas_size=200, canvas_width=200,
+            canvas_height=200, placement="center", offset_x=0, offset_y=0,
             alpha=None, custom_palette_image=None):
         report = []
 
@@ -166,11 +202,16 @@ class PixelForgeSpriteStudio:
         # ---- 2. grid recover (alpha-aware: edge blocks take subject color
         #         only, so no backdrop halo survives the reduce) ----
         src_grid = None
+        grid_frames = None
         if sharpen_grid:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
                 images, "auto", 4, 12, "median", False, alpha=alpha)
             report.append(f"grid: {gw}x{gh}")
             src_grid = (gw, gh)
+        # pre-quantize frames = motion reference for the movelock motion fix
+        # (measuring motion AFTER quantize would read palette snapping as
+        # movement and nothing would count as static)
+        grid_frames = images
 
         # ---- resolve size (after grid recover: Source uses the true grid) ----
         if size_preset == "Custom size":
@@ -225,21 +266,32 @@ class PixelForgeSpriteStudio:
                 images, tw, th, "nearest", "custom", palette_mode, "kmeans",
                 fixed_palette, use_colors, "lab", dmode, dstrength, True,
                 cleanup, p["saturation"], p["contrast"], p["sharpen"], 1,
-                p["flatten"], custom_palette_image=custom_palette_image,
+                p["flatten"], temporal_lock=0.0,
+                custom_palette_image=custom_palette_image,
                 alpha=alpha)
             report.append(f"look: {look.lower()}, palette: {palette}")
 
-        # ---- 4. motion fix (post-look, despike: zero-lag blip removal that
-        #         cannot eat the sprite; runs on the final palette + matte) ----
+        # ---- 4. motion fix (post-look, on the final palette + matte).
+        #         despike: zero-lag blip removal that cannot eat the sprite.
+        #         movelock: static-source pixels collapse to their mode color
+        #         (motion measured on the pre-quantize grid frames). ----
         if _MOTION[motion_fix] is not None:
             mode, thr, commit, hold = _MOTION[motion_fix]
             images, alpha = PixelForgeTemporalStabilize().run(
-                images, mode, thr, commit, hold, alpha=alpha)
+                images, mode, thr, commit, hold, alpha=alpha,
+                motion_ref=grid_frames if mode == "movelock" else None)
             report.append(f"motion_fix: {motion_fix.lower()}")
 
-        # ---- 5. crop & anchor ----
-        images, alpha, crop_info = PixelForgeAutoCrop().run(
-            images, "union", anchor, 2, 8, 0, alpha=alpha)
+        # ---- 5. crop & anchor (tight) or place on a fixed artist canvas ----
+        if canvas == "Tight (crop to sprite)":
+            images, alpha, crop_info = PixelForgeAutoCrop().run(
+                images, "union", anchor, 2, 8, 0, alpha=alpha)
+        else:
+            cwid = canvas_size if canvas == "Fixed square" else canvas_width
+            chei = canvas_size if canvas == "Fixed square" else canvas_height
+            images, alpha, crop_info = PixelForgeAutoCrop().run(
+                images, "union", anchor, 2, 8, 0, "fixed", cwid, chei,
+                placement, offset_x, offset_y, alpha=alpha)
         report.append(f"crop: {crop_info}")
 
         # ---- 6. loop trim ----
@@ -309,18 +361,20 @@ class PixelForgeEasyExport:
 
         def _collect(r):
             # SaveGIF/AsepriteExport return {"ui": ..., "result": (report,)} —
-            # propagate the ui payload so the preview shows ON this node
-            # instead of being dropped (and don't stringify the dict into
-            # the report text).
+            # propagate the ANIMATED preview so it shows ON this node. Only
+            # the animated (webp) entry is surfaced: AsepriteExport's ui dumps
+            # every PNG frame, and if those land first the frontend's animated
+            # preview widget shows imgs[0] = a static frame — the "GIF doesn't
+            # display" bug. The PNG sequence is still on disk (see report).
             nonlocal ui_animated
             if isinstance(r, dict):
                 rep = r.get("result", ("",))
                 report.append(rep[0] if isinstance(rep, (tuple, list))
                               else str(rep))
                 ui = r.get("ui") or {}
-                ui_images.extend(ui.get("images", []))
                 if ui.get("animated"):
                     ui_animated = ui["animated"]
+                    ui_images[:] = ui.get("images", []) + ui_images
             else:
                 report.append(r[0] if isinstance(r, (tuple, list)) else str(r))
 
@@ -395,3 +449,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PixelForgeEasyExport": "\U0001F4E6 Sprite Export (Easy v2)",
     "PixelForgeEasyPrompt": "\U0001F4AC H3 Sprite Prompt (Easy v2)",
 }
+

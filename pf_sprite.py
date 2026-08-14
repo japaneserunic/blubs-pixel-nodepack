@@ -67,6 +67,13 @@ def _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance):
         key_hue = float(np.degrees(np.arctan2(key_lab[2], key_lab[1])))
         dhue = np.abs((cand_hue - key_hue + 180.0) % 360.0 - 180.0)
         hue_tol = 12.0 + tolerance * 48.0
+        # SHADOW HUE DRIFT: deep shadow on a chroma screen drifts in hue as it
+        # darkens (measured on H3 green-screen foot shadows: dhue 22 at dL -36,
+        # while the flat backdrop holds dhue < 10). Widen the hue gate with
+        # darkness so shadowed backdrop stays a candidate; the chroma floor
+        # below still protects near-gray costume pieces.
+        dark = np.clip(-dL / 40.0, 0.0, 1.0)
+        hue_tol = hue_tol * (1.0 + dark)
         # CHROMA FLOOR: near-gray pixels (white/gray suit, skin highlights)
         # have an UNSTABLE hue angle that can land on the key's hue by
         # accident — without a floor they get keyed and the subject 'eats
@@ -379,6 +386,25 @@ class PixelForgeAutoCrop:
                                           "tooltip": "Round canvas size up to a multiple of this."}),
                 "out_size": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 8,
                                      "tooltip": "0 = keep cropped size. >0 = nearest-resize canvas to this square."}),
+                # --- v2 widgets appended (positional compat) ---
+                "canvas_mode": (["content", "fixed"],
+                                {"tooltip": "content = canvas hugs the sprite (old behavior). fixed = exact "
+                                            "canvas_width x canvas_height canvas with the sprite PLACED inside "
+                                            "(how real sprite assets ship: 200x200 canvas, character centered)."}),
+                "canvas_width": ("INT", {"default": 200, "min": 8, "max": 2048, "step": 8,
+                                         "tooltip": "fixed mode: exact canvas width in art pixels."}),
+                "canvas_height": ("INT", {"default": 200, "min": 8, "max": 2048, "step": 8,
+                                          "tooltip": "fixed mode: exact canvas height in art pixels."}),
+                "placement": (["center", "top_center", "bottom_center",
+                               "left_center", "right_center",
+                               "top_left", "top_right", "bottom_left", "bottom_right"],
+                              {"tooltip": "fixed mode: where the sprite sits inside the canvas. "
+                                          "If the sprite is bigger than the canvas it overflows "
+                                          "symmetrically from this anchor."}),
+                "offset_x": ("INT", {"default": 0, "min": -1024, "max": 1024,
+                                     "tooltip": "fixed mode: nudge the sprite right (+) / left (-) in art pixels."}),
+                "offset_y": ("INT", {"default": 0, "min": -1024, "max": 1024,
+                                     "tooltip": "fixed mode: nudge the sprite down (+) / up (-) in art pixels."}),
             },
             "optional": {"alpha": ("MASK",)},
         }
@@ -395,7 +421,9 @@ class PixelForgeAutoCrop:
         dist = np.abs(rgb.astype(np.float32) - bg.reshape(1, 1, 1, 3)).max(-1)
         return dist > 24
 
-    def run(self, images, bbox_mode, anchor, padding, size_multiple, out_size, alpha=None):
+    def run(self, images, bbox_mode, anchor, padding, size_multiple, out_size,
+            canvas_mode="content", canvas_width=200, canvas_height=200,
+            placement="center", offset_x=0, offset_y=0, alpha=None):
         rgb = _to_np(images)
         n, h, w, _ = rgb.shape
         am = _masks_to_np(alpha, n, h, w)
@@ -412,10 +440,26 @@ class PixelForgeAutoCrop:
         else:
             boxes = [bbox_of(content[i]) for i in range(n)]
 
-        max_bw = max(b[2] - b[0] for b in boxes) + 2 * padding
-        max_bh = max(b[3] - b[1] for b in boxes) + 2 * padding
-        cw = int(math.ceil(max_bw / size_multiple) * size_multiple)
-        ch = int(math.ceil(max_bh / size_multiple) * size_multiple)
+        fixed = canvas_mode == "fixed" and canvas_width > 0 and canvas_height > 0
+        if fixed:
+            # exact artist canvas (e.g. 200x200) — no size_multiple rounding
+            cw, ch = int(canvas_width), int(canvas_height)
+        else:
+            max_bw = max(b[2] - b[0] for b in boxes) + 2 * padding
+            max_bh = max(b[3] - b[1] for b in boxes) + 2 * padding
+            cw = int(math.ceil(max_bw / size_multiple) * size_multiple)
+            ch = int(math.ceil(max_bh / size_multiple) * size_multiple)
+
+        def _placed_origin(fw, fh):
+            """fixed mode: 9-point placement + manual offset."""
+            col = {"left": 0, "center": (cw - fw) // 2, "right": cw - fw}
+            row = {"top": 0, "center": (ch - fh) // 2, "bottom": ch - fh}
+            vert, _, horiz = placement.partition("_")
+            if not horiz:          # bare "center"
+                vert, horiz = "center", "center"
+            elif vert in ("left", "right"):   # left_center / right_center
+                vert, horiz = "center", vert
+            return col[horiz] + offset_x, row[vert] + offset_y
 
         out_rgb = np.zeros((n, ch, cw, 3), dtype=np.uint8)
         out_a = np.zeros((n, ch, cw), dtype=np.float32)
@@ -426,17 +470,28 @@ class PixelForgeAutoCrop:
             x1 = min(w, x1 + padding); y1 = min(h, y1 + padding)
             crop = rgb[i, y0:y1, x0:x1]
             fh, fw = crop.shape[:2]
-            if anchor == "bottom_center":
+            if fixed:
+                ox, oy = _placed_origin(fw, fh)
+            elif anchor == "bottom_center":
                 ox, oy = (cw - fw) // 2, ch - fh
             elif anchor == "center":
                 ox, oy = (cw - fw) // 2, (ch - fh) // 2
             else:
                 ox, oy = 0, 0
-            out_rgb[i, oy:oy + fh, ox:ox + fw] = crop
-            if am is not None:
-                out_a[i, oy:oy + fh, ox:ox + fw] = am[i, y0:y1, x0:x1]
-            else:
-                out_a[i, oy:oy + fh, ox:ox + fw] = content[i, y0:y1, x0:x1].astype(np.float32)
+            # clip-aware paste: sprite may overflow the canvas in fixed mode
+            sx0, sy0 = max(0, -ox), max(0, -oy)
+            dx0, dy0 = max(0, ox), max(0, oy)
+            pw = min(fw - sx0, cw - dx0)
+            ph = min(fh - sy0, ch - dy0)
+            if pw > 0 and ph > 0:
+                out_rgb[i, dy0:dy0 + ph, dx0:dx0 + pw] = crop[sy0:sy0 + ph, sx0:sx0 + pw]
+                if am is not None:
+                    out_a[i, dy0:dy0 + ph, dx0:dx0 + pw] = am[i, y0 + sy0:y0 + sy0 + ph,
+                                                              x0 + sx0:x0 + sx0 + pw]
+                else:
+                    out_a[i, dy0:dy0 + ph, dx0:dx0 + pw] = \
+                        content[i, y0 + sy0:y0 + sy0 + ph,
+                                x0 + sx0:x0 + sx0 + pw].astype(np.float32)
             infos.append([x0, y0, x1, y1, ox, oy])
 
         if out_size > 0:
@@ -451,7 +506,9 @@ class PixelForgeAutoCrop:
             out_rgb, out_a = new_rgb, new_a
             ch = cw = out_size
 
-        info = json.dumps({"canvas": [cw, ch], "boxes": infos, "frames": n})
+        info = json.dumps({"canvas": [cw, ch], "canvas_mode": canvas_mode,
+                           "placement": placement if fixed else anchor,
+                           "boxes": infos, "frames": n})
         return (_to_tensor(out_rgb), torch.from_numpy(out_a), info)
 
 
@@ -480,6 +537,23 @@ class PixelForgeLoopTrim:
     def run(self, images, mode, max_loop_error, search_tail_fraction, alpha=None):
         n = images.shape[0]
         report = {"mode": mode, "input_frames": int(n)}
+
+        def _frame_err(a_img, b_img, a_m, b_m):
+            """Visible-frame diff. With mattes wired, the mean is taken over
+            the UNION of opaque px only (pre-multiplied RGB + matte term), so
+            the measure is canvas-size invariant: a small sprite on a big
+            fixed artist canvas no longer dilutes the error to ~0."""
+            if a_m is None:
+                return float((a_img.float() - b_img.float()).abs().mean())
+            au = (a_m > 0.5) | (b_m > 0.5)
+            if not bool(au.any()):
+                return 0.0
+            af = a_m.float()[..., None]
+            bf = b_m.float()[..., None]
+            d_rgb = (a_img.float() * af - b_img.float() * bf).abs().mean(-1)
+            d_a = (a_m.float() - b_m.float()).abs()
+            return float((d_rgb + d_a)[au].mean() * 0.5)
+
         if mode == "off" or n < 3:
             report["note"] = "untouched"
             return (images, alpha if alpha is not None else torch.ones(n, images.shape[1], images.shape[2]), json.dumps(report))
@@ -494,8 +568,11 @@ class PixelForgeLoopTrim:
             return (out, out_a if out_a is not None else torch.ones(out.shape[0], out.shape[1], out.shape[2]), json.dumps(report))
 
         ref = images[:1].float()
+        ref_a = alpha[:1] if alpha is not None else None
         start = max(1, int(n * (1.0 - search_tail_fraction)))
-        errs = [float((images[k:k + 1].float() - ref).abs().mean()) for k in range(start, n)]
+        errs = [_frame_err(images[k:k + 1], ref,
+                           alpha[k:k + 1] if alpha is not None else None,
+                           ref_a) for k in range(start, n)]
         best_k = int(np.argmin(errs)) + start
         best_err = errs[best_k - start]
         if best_err <= max_loop_error:
@@ -537,7 +614,21 @@ class PixelForgeFrameDedup:
         keep = [0]
         durations = []
         for i in range(1, n):
-            d = float((images[i:i + 1].float() - images[keep[-1]:keep[-1] + 1].float()).abs().mean())
+            j = keep[-1]
+            if alpha is None:
+                d = float((images[i:i + 1].float() - images[j:j + 1].float()).abs().mean())
+            else:
+                # canvas-size invariant: mean over the union of opaque px,
+                # premultiplied RGB + matte term (same metric as LoopTrim)
+                au = (alpha[i] > 0.5) | (alpha[j] > 0.5)
+                if not bool(au.any()):
+                    d = 0.0
+                else:
+                    ai = alpha[i].float()[..., None]
+                    aj = alpha[j].float()[..., None]
+                    d_rgb = (images[i].float() * ai - images[j].float() * aj).abs().mean(-1)
+                    d_a = (alpha[i].float() - alpha[j].float()).abs()
+                    d = float((d_rgb + d_a)[au].mean() * 0.5)
             if d > threshold:
                 durations.append(i - keep[-1])
                 keep.append(i)
