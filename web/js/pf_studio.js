@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.6.0-bgsync — backdrop-sync keying fix (python) + chip bump");
-const PFS_VERSION = "v3.6.0-bgsync";
+console.info("[PixelForge] pf_studio v3.6.1-presetview — preset controls show resolved values");
+const PFS_VERSION = "v3.6.1-presetview";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
@@ -1474,6 +1474,92 @@ function createForge(node, config) {
     // ---- parameter controls (every native widget, mirrored two-way) ----
     const widgetByName = (n) => (node.widgets || []).find(w => w.name === n);
     const ctrls = [];
+    // ---- v3.6.1-presetview: "preset" shows what it RESOLVES to, live ----
+    // Mirrors the _pick/_tri fallbacks in pf_studio.py PixelForgeSuperForge.run()
+    // (the One Forge forges through that same code path). Resolved values track
+    // the main knobs: look / key_strength / motion_fix. Keep in sync with python.
+    const presetLabels = [];
+    const PFS_KS = { "Gentle": [0.18, 0.8], "Normal": [0.25, 1.2], "Aggressive": [0.35, 2.0] };
+    const PFS_MOTION = { "Off": null, "Light": ["despike", 4, 1, 1], "Strong": ["despike_matte", 4, 1, 1], "Extra strong": ["movelock", 20, 1, 1], "Smooth shading": ["median3_inner", 10, 2, 3] };
+    const PFS_QLOOK = { "Modern (smooth color)": [1.0, 1.0, 0.0], "Retro 16-bit": [1.15, 1.05, 0.4], "Hardcore 8-bit": [1.05, 1.05, 0.3] };
+    function presetResolved(name) {
+        const gv = (n) => { const x = widgetByName(n); return x ? x.value : undefined; };
+        const look = gv("look");
+        const ks = PFS_KS[gv("key_strength")] ? gv("key_strength") : "Normal";
+        const mf = (gv("motion_fix") in PFS_MOTION) ? gv("motion_fix") : "Off";
+        const hibit = typeof look === "string" && look.startsWith("Hi-bit");
+        const cel = look === "Hi-bit cel shading";
+        const qNA = hibit ? "n/a" : undefined;   // quantize rows unused under hi-bit looks
+        const tpNA = hibit ? undefined : "n/a";  // hi-bit rows unused under quantize looks
+        switch (name) {
+            case "adv_key_method": return "flood";
+            case "adv_key_tolerance": return PFS_KS[ks][0];
+            case "adv_key_shadow": return PFS_KS[ks][1];
+            case "adv_key_softness": return 0;
+            case "adv_key_erode": return 1;
+            case "adv_key_despill": return "on";
+            case "adv_key_interior": return "on";
+            case "adv_key_interior_tol": return 0.5;
+            case "adv_key_interior_max_area": return 2.0;
+            case "adv_key_rescue": return "on";
+            case "adv_key_temporal_alpha": return "on";
+            case "adv_key_drop_detached": return 5;
+            case "adv_q_method": return qNA || "kmeans";
+            case "adv_q_mapping": return qNA || "lab";
+            case "adv_q_saturation": return qNA || (PFS_QLOOK[look] || [1.25])[0];
+            case "adv_q_contrast": return qNA || (PFS_QLOOK[look] || [0, 1.1])[1];
+            case "adv_q_sharpen": return qNA || (PFS_QLOOK[look] || [0, 0, 0.6])[2];
+            case "adv_q_flatten": return qNA || 0;
+            case "adv_q_temporal_lock": return qNA || 0;
+            case "adv_tp_bands": return tpNA || (cel ? 3 : 1);
+            case "adv_tp_hue_shift": return tpNA || (cel ? 0.3 : 0);
+            case "adv_tp_vibrancy": return tpNA || 1.15;
+            case "adv_tp_cel_contrast": return tpNA || 1.25;
+            case "adv_tp_outline": return tpNA || (cel ? "on" : "off");
+            case "adv_tp_ambient": return tpNA || 0.35;
+            case "adv_tp_shadow_thr": return tpNA || 0.55;
+            case "adv_tp_highlight_thr": return tpNA || 0.85;
+            case "adv_tp_flatten": return tpNA || 5;
+            case "adv_tp_saturation": return tpNA || 1.25;
+            case "adv_tp_contrast": return tpNA || 1.1;
+            case "adv_tp_sharpen": return tpNA || 0.6;
+            case "adv_tp_share": return tpNA || 0.75;
+            case "adv_motion_mode": { const m = PFS_MOTION[mf]; return m ? m[0] : "off"; }
+            case "adv_motion_threshold": { const m = PFS_MOTION[mf]; return m ? m[1] : 10; }
+            case "adv_motion_commit": { const m = PFS_MOTION[mf]; return m ? m[2] : 2; }
+            case "adv_motion_hold": { const m = PFS_MOTION[mf]; return m ? m[3] : 3; }
+            case "adv_crop_padding": return 2;
+            case "adv_crop_snap": return 8;
+            case "adv_loop_max_error": return 0.06;
+            case "adv_loop_tail": return 0.5;
+            case "adv_dedup_threshold": return 0.01;
+        }
+        return undefined;
+    }
+    function refreshPresetLabels() {
+        for (const it of presetLabels) {
+            const rv = presetResolved(it.w.name);
+            if (it.kind === "num") {
+                it.num.placeholder = rv !== undefined ? String(rv) : "preset";
+                it.num.title = ((it.w.options && it.w.options.tooltip) || "") +
+                    (rv !== undefined ? "  [inheriting " + rv + " - type a number to override]" : "  (empty / -1 = preset)");
+            } else {
+                const opt = [...it.ctl.options].find(o => o.value === "preset");
+                if (opt) opt.textContent = rv !== undefined ? "preset (" + rv + ")" : "preset";
+                if (it.w.value === "preset" && rv !== undefined)
+                    it.ctl.title = ((it.w.options && it.w.options.tooltip) || "") + "  [preset = " + rv + "]";
+            }
+        }
+    }
+    for (const knob of ["look", "key_strength", "motion_fix"]) {
+        const kw = widgetByName(knob);
+        if (kw && !kw._pfsPresetHooked) {
+            kw._pfsPresetHooked = true;
+            const prev = kw.callback;
+            kw.callback = function (...a) { if (prev) prev.apply(this, a); try { refreshPresetLabels(); } catch (_) {} };
+        }
+    }
+
 
     function setWidgetValue(w, v) {
         w.value = v;
@@ -1497,6 +1583,15 @@ function createForge(node, config) {
             }
             ctl.value = w.value;
             if (w.options && w.options.tooltip) ctl.title = w.options.tooltip;
+            // v3.6.1: a "preset" choice shows what it resolves to
+            if (vals.indexOf("preset") !== -1) {
+                presetLabels.push({ kind: "combo", ctl, w });
+                const rv = presetResolved(w.name);
+                const opt = [...ctl.options].find(o => o.value === "preset");
+                if (opt && rv !== undefined) opt.textContent = "preset (" + rv + ")";
+                if (w.value === "preset" && rv !== undefined)
+                    ctl.title = (w.options.tooltip || "") + "  [preset = " + rv + "]";
+            }
             ctl.addEventListener("change", () => setWidgetValue(w, ctl.value));
             sync = () => { if (String(ctl.value) !== String(w.value)) ctl.value = w.value; };
             row.appendChild(ctl);
@@ -1541,8 +1636,10 @@ function createForge(node, config) {
             num.type = "number"; num.value = showVal(w.value);
             num.min = w.options?.min ?? ""; num.max = w.options?.max ?? ""; num.step = step;
             if (presetSentinel) {
-                num.placeholder = "preset";
-                num.title = (w.options?.tooltip || "") + " (empty / -1 = preset)";
+                const rv = presetResolved(w.name);
+                num.placeholder = rv !== undefined ? String(rv) : "preset";
+                num.title = (w.options?.tooltip || "") + (rv !== undefined ? "  [inheriting " + rv + " - type a number to override]" : " (empty / -1 = preset)");
+                presetLabels.push({ kind: "num", num, w });
             }
             let slider = null;
             let sliding = false;
