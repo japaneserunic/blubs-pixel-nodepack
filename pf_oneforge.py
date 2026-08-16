@@ -145,11 +145,13 @@ def _hex_rgba(h, fallback=(0, 255, 0, 255)):
         return fallback
 
 
-def _load_drawn_ref(name, width, height, bg_hex):
+def _load_drawn_ref(name, width, height, bg_hex, dx=0, dy=0):
     """Load a suite-drawn reference PNG from ComfyUI's temp dir and prepare it
     for ref2va: alpha-bbox auto-crop (detect the painted sprite), flatten onto
     the forge key color, integer NEAREST upscale to fit the gen frame
     (pixel-perfect — no resampling blur), centered on a gen-size canvas.
+    dx/dy offset the paste position (in sprite pixels, scaled by the same
+    integer factor) so the suite's placement dot steers where the ref sits.
     Returns an IMAGE tensor [1,H,W,3], or None on any problem."""
     try:
         base = os.path.basename(str(name or "").strip())
@@ -170,13 +172,15 @@ def _load_drawn_ref(name, width, height, bg_hex):
         k = min(width // bw, height // bh)
         if k >= 1:
             img = img.resize((bw * k, bh * k), Image.NEAREST)
+            ox, oy = int(round(dx * k)), int(round(dy * k))
         else:  # drawn sprite bigger than the gen frame — contain, still NN
             s = min(width / bw, height / bh)
             img = img.resize((max(1, round(bw * s)), max(1, round(bh * s))),
                              Image.NEAREST)
+            ox, oy = int(round(dx * s)), int(round(dy * s))
         canvas = Image.new("RGBA", (width, height), bg)
-        canvas.alpha_composite(img, ((width - img.width) // 2,
-                                     (height - img.height) // 2))
+        canvas.alpha_composite(img, ((width - img.width) // 2 + ox,
+                                     (height - img.height) // 2 + oy))
         arr = np.asarray(canvas.convert("RGB"), dtype=np.float32) / 255.0
         return torch.from_numpy(arr)[None,]
     except Exception as e:  # never let a ref helper kill the whole gen
@@ -281,6 +285,11 @@ class PixelForgeOneForge:
                                 "tooltip": "Suite-drawn reference (temp PNG filename). Set by the "
                                            "suite's drawn-ref toggle; becomes <Picture 1> when no "
                                            "first_frame is wired. Auto-cropped + nearest-upscaled."}),
+            # Second suite ref slot (<Picture 2>). Also MUST stay last.
+            "drawn_ref_image_2": ("STRING", {"default": "",
+                                "tooltip": "Suite ref slot 2 (temp PNG filename). Set by the suite's "
+                                           "ref-slot buttons; becomes <Picture 2> when no ref_image_2 "
+                                           "is wired."}),
         }
         required = {}
         required.update(gen)
@@ -305,7 +314,7 @@ class PixelForgeOneForge:
             attention_backend, ffn_chunks, ffn_seq_threshold,
             filename_prefix, export_fps, make_gif, gif_size, make_sheet,
             sheet_columns, sheet_bg, build_aseprite, aseprite_path,
-            drawn_ref_image="",
+            drawn_ref_image="", drawn_ref_image_2="",
             images=None, first_frame=None, ref_image_2=None,
             alpha=None, custom_palette_image=None,
             **forge):
@@ -340,11 +349,15 @@ class PixelForgeOneForge:
             # Reference-to-Video (ref2va) is the single conditioning path:
             # no refs wired = plain t2v; refs wired = image-anchored gen.
             refs = {}
+            # Suite placement dot steers where slot refs land on the gen frame.
+            _pdx = int(forge.get("placement_x", 0) or 0)
+            _pdy = int(forge.get("placement_y", 0) or 0)
             if first_frame is not None:
                 refs["ref_image_1"] = first_frame
             elif drawn_ref_image:
                 dref = _load_drawn_ref(drawn_ref_image, width, height,
-                                       forge.get("custom_bg_hex", "#00FF00"))
+                                       forge.get("custom_bg_hex", "#00FF00"),
+                                       dx=_pdx, dy=_pdy)
                 if dref is not None:
                     refs["ref_image_1"] = dref
                     log_lines.append(
@@ -352,9 +365,20 @@ class PixelForgeOneForge:
                         f"(bbox-cropped, nearest-upscaled into {width}x{height})")
             if ref_image_2 is not None:
                 refs["ref_image_2"] = ref_image_2
+            elif drawn_ref_image_2:
+                dref2 = _load_drawn_ref(drawn_ref_image_2, width, height,
+                                        forge.get("custom_bg_hex", "#00FF00"),
+                                        dx=_pdx, dy=_pdy)
+                if dref2 is not None:
+                    refs["ref_image_2"] = dref2
+                    log_lines.append(
+                        f"ref slot 2: {os.path.basename(drawn_ref_image_2)} -> <Picture 2>")
             ref_prompt = prompt
             if refs:
-                tags = ", ".join(f"<Picture {i}>" for i in range(1, len(refs) + 1))
+                # Tags must match the ACTUAL ref slots used (slot 2 alone is
+                # still <Picture 2>), not a 1..N range.
+                tags = ", ".join(f"<Picture {k.rsplit('_', 1)[1]}>"
+                                 for k in sorted(refs))
                 ref_prompt = f"{prompt.rstrip()} The subject matches {tags}."
 
             print("[OneForge] encoding prompt…", flush=True)

@@ -408,6 +408,8 @@ class PixelForgeSuperForge:
             meta["motion"] = {"skipped": True, "frames": 0, "shown": 0, "w": 0, "h": 0}
 
         # ---------------- crop & anchor ----------------
+        # Suite placement dot: nudges the sprite inside a fixed canvas
+        # (frontend writes placement_x/y from the dot, center-relative).
         pad = _pick(adv_crop_padding, 2)
         snap = _pick(adv_crop_snap, 8)
         if canvas == "Tight (crop to sprite)":
@@ -418,7 +420,8 @@ class PixelForgeSuperForge:
             chei = canvas_size if canvas == "Fixed square" else canvas_height
             images, alpha, crop_info = PixelForgeAutoCrop().run(
                 images, "union", anchor, pad, snap, 0, "fixed", cwid, chei,
-                placement, offset_x, offset_y, alpha=alpha)
+                placement, offset_x + placement_x, offset_y + placement_y,
+                alpha=alpha)
         report.append(f"crop: {crop_info}")
 
         # ---------------- loop trim ----------------
@@ -438,6 +441,21 @@ class PixelForgeSuperForge:
                 durations_frames = json.loads(durations_json).get("durations_frames")
             except Exception:
                 durations_frames = None
+        # ---------------- suite marquee selection ----------------
+        # The in-node workspace writes selection_x/y/w/h from the marquee
+        # tool: crop the forged frames to the selected rect (sprite pixels).
+        if selection_w > 0 and selection_h > 0:
+            h0, w0 = images.shape[1], images.shape[2]
+            sx0 = min(max(0, selection_x), max(0, w0 - 1))
+            sy0 = min(max(0, selection_y), max(0, h0 - 1))
+            sx1 = min(w0, sx0 + selection_w)
+            sy1 = min(h0, sy0 + selection_h)
+            if sx1 > sx0 and sy1 > sy0 and (sx0 or sy0 or sx1 < w0 or sy1 < h0):
+                images = images[:, sy0:sy1, sx0:sx1, :]
+                if alpha is not None:
+                    alpha = alpha[:, sy0:sy1, sx0:sx1]
+                report.append(f"selection: {sx1 - sx0}x{sy1 - sy0} @ {sx0},{sy0}")
+
         capture("final", images, alpha, pixel_exact=True)
 
         n = images.shape[0]

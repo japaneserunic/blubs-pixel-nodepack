@@ -1,4 +1,4 @@
-/* VERSION: v3.2.1-layoutwar (2026-08-16) — force cache bust
+/* VERSION: v3.3.0-reflayers (2026-08-16) — force cache bust
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -432,6 +432,7 @@ function createForge(node, config) {
         brushColor: "#ffffff", // draw-tool brush color
         showPlacementDot: true,
         drawnRef: false,      // drawn-ref armed (One Forge): drawing -> <Picture 1>
+        refSlots: { p1: "", p2: "" },  // armed gen-ref slots (temp PNG names)
 
         // Generation target
         genTarget: "new",     // "new" | "current" | <layerId>
@@ -467,10 +468,13 @@ function createForge(node, config) {
         const layer = {
             id: _makeLayerId(),
             name: name || ("Layer " + (st.layers.length + 1)),
+            kind: opts.kind || "normal",   // "normal" | "ref" (reference guide)
+            source: opts.source || "user", // "forge" | "user" | "imported" | "paint"
+            refFile: opts.refFile || "",   // temp filename for imported refs (reload)
             visible: opts.visible !== false,
             opacity: opts.opacity != null ? opts.opacity : 1.0,
             blend: opts.blend || "normal",
-            locked: false,
+            locked: opts.locked === true,
             frames: [],        // sparse: frames[i] = {img: Image, source: string} | null
             transform: { x: 0, y: 0, scale: 1.0, anchorX: 0.5, anchorY: 1.0 },
             keyframes: {},     // frameIdx → {x, y, scale}
@@ -500,6 +504,9 @@ function createForge(node, config) {
         const dup = {
             id: _makeLayerId(),
             name: src.name + " copy",
+            kind: src.kind || "normal",
+            source: src.source || "user",
+            refFile: src.refFile || "",
             visible: src.visible,
             opacity: src.opacity,
             blend: src.blend,
@@ -526,6 +533,7 @@ function createForge(node, config) {
 
     function setActiveLayer(idx) {
         st.activeLayer = Math.max(0, Math.min(st.layers.length - 1, idx));
+        refreshLayerBar();
     }
 
     function getActiveLayer() { return st.layers[st.activeLayer] || null; }
@@ -594,11 +602,15 @@ function createForge(node, config) {
         if (st._compositeCache[frameIdx] && !st.layers.some(l => l._dirty)) {
             return st._compositeCache[frameIdx];
         }
-        // Determine canvas size from the widest/tallest layer frame
+        // Determine canvas size from the widest/tallest CONTENT layer frame.
+        // Reference layers (kind "ref") are guides — they never inflate the
+        // canvas (a big ref sheet would blow up the composite otherwise).
         let w = 64, h = 64;
         for (const l of st.layers) {
-            if (!l.visible || !l.frames[frameIdx]) continue;
-            const s = frameSurf(l.frames[frameIdx]);
+            if (!l.visible || l.kind === "ref") continue;
+            const fr = l.frames[frameIdx];
+            if (!fr) continue;
+            const s = frameSurf(fr);
             if (surfW(s)) {
                 w = Math.max(w, surfW(s));
                 h = Math.max(h, surfH(s));
@@ -611,7 +623,9 @@ function createForge(node, config) {
         // Draw layers bottom→top
         for (const l of st.layers) {
             if (!l.visible) continue;
-            const fr = l.frames[frameIdx];
+            // Ref layers with a single frame show it on EVERY frame (guide)
+            const fr = l.frames[frameIdx] ||
+                (l.kind === "ref" ? l.frames.find(f => f) : null);
             const surf = frameSurf(fr);
             if (!surf || !surfW(surf)) continue;
             const tf = getInterpolatedTransform(l, frameIdx);
@@ -673,7 +687,9 @@ function createForge(node, config) {
     function saveLayerProps() {
         node.properties = node.properties || {};
         node.properties.pfs_layers = st.layers.map(l => ({
-            id: l.id, name: l.name, visible: l.visible, opacity: l.opacity,
+            id: l.id, name: l.name, kind: l.kind || "normal",
+            source: l.source || "user", refFile: l.refFile || "",
+            visible: l.visible, opacity: l.opacity,
             blend: l.blend, locked: l.locked,
             transform: l.transform, keyframes: l.keyframes,
         }));
@@ -683,6 +699,7 @@ function createForge(node, config) {
         node.properties.pfs_showPlacementDot = st.showPlacementDot;
         node.properties.pfs_showDebugStages = st.showDebugStages;
         node.properties.pfs_drawnRef = st.drawnRef;
+        node.properties.pfs_refSlots = { ...st.refSlots };
     }
 
     function restoreLayerProps() {
@@ -691,11 +708,25 @@ function createForge(node, config) {
         // NOTE: an EMPTY pfs_layers array means "no data" (saved before any
         // layer existed) — do NOT wipe the default layer with it.
         if (Array.isArray(p.pfs_layers) && p.pfs_layers.length) {
-            st.layers = p.pfs_layers.map(l => ({
-                ...l, frames: [], _dirty: true,
-                transform: l.transform || { x: 0, y: 0, scale: 1.0, anchorX: 0.5, anchorY: 1.0 },
-                keyframes: l.keyframes || {},
-            }));
+            st.layers = p.pfs_layers.map(l => {
+                const layer = {
+                    ...l, frames: [], _dirty: true,
+                    kind: l.kind || "normal",
+                    source: l.source || "user",
+                    refFile: l.refFile || "",
+                    transform: l.transform || { x: 0, y: 0, scale: 1.0, anchorX: 0.5, anchorY: 1.0 },
+                    keyframes: l.keyframes || {},
+                };
+                // Imported reference layers re-fetch their image from temp
+                // (best effort — temp may have been cleaned between sessions)
+                if (layer.refFile) {
+                    const im = new Image();
+                    im.src = viewURL({ filename: layer.refFile, subfolder: "", type: "temp" });
+                    im.onload = () => { layer._dirty = true; _invalidateAllComposites(); draw(); drawTl(); };
+                    layer.frames[0] = { img: im, source: "imported" };
+                }
+                return layer;
+            });
         }
         st.activeLayer = p.pfs_activeLayer || 0;
         st.genTarget = p.pfs_genTarget || "new";
@@ -703,6 +734,9 @@ function createForge(node, config) {
         st.showPlacementDot = p.pfs_showPlacementDot !== false;
         st.showDebugStages = p.pfs_showDebugStages || false;
         st.drawnRef = !!p.pfs_drawnRef;
+        if (p.pfs_refSlots && typeof p.pfs_refSlots === "object") {
+            st.refSlots = { p1: p.pfs_refSlots.p1 || "", p2: p.pfs_refSlots.p2 || "" };
+        }
     }
 
     // ---- DOM skeleton ----
@@ -897,6 +931,51 @@ function createForge(node, config) {
     const btnLyrMerge = mkLyrBtn("⊞", "Merge down (combine with layer below)", () => {
         // TODO: implement merge down
     });
+    // Reference toggle: mark the active layer as a guide layer — locked,
+    // 40% opacity, single frame shows on every frame, survives executions.
+    const btnLyrRef = mkLyrBtn("🔖", "Mark active layer as a REFERENCE guide (locked, "
+        + "40% opacity, shows on all frames, never wiped by generations). "
+        + "Click again to turn it back into a normal layer.", () => {
+        const l = getActiveLayer(); if (!l) return;
+        if (l.kind === "ref") {
+            l.kind = "normal"; l.locked = false; l.opacity = 1.0;
+        } else {
+            l.kind = "ref"; l.locked = true; l.opacity = 0.4;
+            if (!l.source || l.source === "forge") l.source = "user";
+        }
+        _invalidateAllComposites(); saveLayerProps(); refreshLayerBar(); draw(); drawTl();
+    });
+    // Import an image file as a reference layer (character sheets, pose refs)
+    const fileIn = document.createElement("input");
+    fileIn.type = "file"; fileIn.accept = "image/*"; fileIn.style.display = "none";
+    fileIn.addEventListener("change", async () => {
+        const f = fileIn.files && fileIn.files[0];
+        fileIn.value = "";
+        if (!f) return;
+        try {
+            const fd = new FormData();
+            fd.append("image", f, f.name);
+            fd.append("type", "temp");
+            fd.append("overwrite", "true");
+            const r = await fetch("/upload/image", { method: "POST", body: fd });
+            const j = await r.json();
+            if (!j || !j.name) return;
+            const im = new Image();
+            im.src = viewURL({ filename: j.name, subfolder: j.subfolder || "", type: "temp" });
+            im.onload = () => {
+                const layer = addLayer(f.name.replace(/\.[^.]+$/, ""),
+                    { kind: "ref", source: "imported", refFile: j.name,
+                      locked: true, opacity: 0.4 });
+                layer.frames[0] = { img: im, source: "imported" };
+                _recalcTotalFrames(); _invalidateAllComposites();
+                saveLayerProps(); refreshLayerBar(); draw(); drawTl();
+            };
+        } catch (e) { console.warn("[PixelForge] ref import failed:", e); }
+    });
+    const btnLyrImport = mkLyrBtn("📥", "Import an image as a reference layer "
+        + "(character sheet, pose ref — placed as a locked guide you can trace "
+        + "or push into a gen-ref slot)", () => fileIn.click());
+    root.appendChild(fileIn);
 
     // Opacity slider for active layer
     const opacWrap = document.createElement("span"); opacWrap.className = "pfs-lyr-opac";
@@ -943,16 +1022,53 @@ function createForge(node, config) {
     // Layer name display
     const lyrNameEl = document.createElement("span"); lyrNameEl.className = "pfs-lyr-name";
 
-    layerBar.append(btnLyrAdd, btnLyrDup, btnLyrDel, btnLyrUp, btnLyrDown, btnLyrMerge);
+    layerBar.append(btnLyrAdd, btnLyrDup, btnLyrDel, btnLyrUp, btnLyrDown, btnLyrMerge,
+        btnLyrRef, btnLyrImport);
     layerBar.append(opacWrap, genTargetWrap, lyrNameEl);
     tlWrap.appendChild(layerBar);
+
+    // ---- gen-ref slots (One Forge): push the active layer's frame into
+    // ref2va <Picture 1> / <Picture 2>. Chain-Studio-style panel refs: pick
+    // the layer, arm the slot, generate. A wired socket still wins. ----
+    const refSlotWrap = document.createElement("span"); refSlotWrap.className = "pfs-lyr-gen";
+    const refSlotLbl = document.createElement("span"); refSlotLbl.className = "pfs-lyr-gen-lbl";
+    refSlotLbl.textContent = "Refs:";
+    const refSlotBtns = {};
+    for (const slot of ["p1", "p2"]) {
+        const tag = slot === "p1" ? "<Picture 1>" : "<Picture 2>";
+        const b = mkLyrBtn(slot.toUpperCase(), `Gen-ref slot ${tag}: push the ACTIVE layer's `
+            + `current frame as the generation reference. Click to arm/re-push; `
+            + `armed slot glows — click again to clear. A wired socket overrides the slot.`, async () => {
+            if (st.refSlots[slot]) { clearRefSlot(slot); return; }
+            await pushLayerToRefSlot(slot);
+        });
+        refSlotBtns[slot] = b;
+        refSlotWrap.appendChild(b);
+    }
+    refSlotWrap.insertBefore(refSlotLbl, refSlotWrap.firstChild);
+    function refreshRefSlots() {
+        for (const slot of ["p1", "p2"]) {
+            const b = refSlotBtns[slot];
+            const armed = !!st.refSlots[slot];
+            b.classList.toggle("on", armed);
+            b.style.color = armed ? "#ff9d45" : "";
+            b.title = armed
+                ? `${slot.toUpperCase()} armed: ${st.refSlots[slot]} — click to clear, or re-push after editing the layer`
+                : `Gen-ref slot: push the ACTIVE layer's current frame as ${slot === "p1" ? "<Picture 1>" : "<Picture 2>"}`;
+        }
+    }
+    if (config.tabs) {
+        layerBar.appendChild(refSlotWrap);
+        refreshRefSlots();
+    }
 
     function refreshLayerBar() {
         const layer = getActiveLayer();
         if (!layer) return;
         opacSlider.value = layer.opacity;
         opacVal.textContent = Math.round(layer.opacity * 100) + "%";
-        lyrNameEl.textContent = layer.name;
+        lyrNameEl.textContent = layer.name + (layer.kind === "ref" ? " 🔖" : "");
+        btnLyrRef.style.color = layer.kind === "ref" ? "#ff9d45" : "";
         refreshGenTarget();
     }
 
@@ -1395,12 +1511,16 @@ function createForge(node, config) {
             const oldLayerMap = {};
             for (const l of st.layers) oldLayerMap[l.id] = l;
 
-            st.layers = [];
+            // Build the incoming forge layers from the payload
+            const incoming = [];
             for (const ld of layerList) {
                 const existing = oldLayerMap[ld.id];
                 const layer = {
                     id: ld.id || _makeLayerId(),
-                    name: ld.name || ("Layer " + (st.layers.length + 1)),
+                    name: ld.name || ("Layer " + (incoming.length + 1)),
+                    kind: "normal",
+                    source: "forge",
+                    refFile: "",
                     visible: existing ? existing.visible : true,
                     opacity: existing ? existing.opacity : 1.0,
                     blend: existing ? existing.blend : "normal",
@@ -1418,13 +1538,35 @@ function createForge(node, config) {
                         const im = new Image();
                         im.src = viewURL(r);
                         im.onload = () => { layer._dirty = true; _invalidateAllComposites(); draw(); drawTl(); };
-                        return { img: im, source: ld.source || "forge" };
+                        return { img: im, source: "forge" };
                     });
                 }
-                st.layers.push(layer);
+                incoming.push(layer);
             }
-            st.activeLayer = Math.min(st.activeLayer, st.layers.length - 1);
-            if (st.activeLayer < 0) st.activeLayer = 0;
+
+            // USER LAYERS SURVIVE: reference guides, imports and painted
+            // layers are never wiped by an execution — only forge-owned
+            // (generated) layers get replaced.
+            const tgt = st.genTarget || "new";
+            let target = null;
+            if (tgt === "current") target = st.layers[st.activeLayer] || null;
+            else if (tgt !== "new") target = st.layers.find(l => l.id === tgt) || null;
+
+            if (target && incoming.length) {
+                // Fill the target layer in place — identity, transform,
+                // keyframes and ref/normal kind all survive the regen.
+                target.frames = incoming[0].frames;
+                target._dirty = true;
+                incoming.shift();
+            }
+            const targetId = target ? target.id : null;
+            st.layers = st.layers.filter(l =>
+                (l.source && l.source !== "forge") || l.id === targetId);
+            st.layers.push(...incoming);
+            if (!st.layers.length && incoming.length) st.layers = [incoming[0]];
+            const actIdx = st.layers.findIndex(l => l.id ===
+                (target ? target.id : (incoming[0] && incoming[0].id)));
+            st.activeLayer = actIdx >= 0 ? actIdx : 0;
 
             // Debug stages: move pipeline stages to debug mode
             st.debugStages = {};
@@ -1441,6 +1583,8 @@ function createForge(node, config) {
             _invalidateAllComposites();
             st.frame = 0; st._acc = 0; st.tlScroll = 0; st._palKey = "";
             reportEl.textContent = st.report;
+            saveLayerProps();
+            refreshLayerBar();
             updateInfo(); draw(); drawTl();
             return;
         }
@@ -1500,6 +1644,7 @@ function createForge(node, config) {
             const finalFrames = refs.final || refs[Object.keys(refs).pop()] || [];
             const layer = {
                 id: _makeLayerId(), name: "Generated",
+                kind: "normal", source: "forge", refFile: "",
                 visible: true, opacity: 1.0, blend: "normal", locked: false,
                 frames: finalFrames.map(r => {
                     if (!r || !r.filename) return null;
@@ -1901,6 +2046,12 @@ function createForge(node, config) {
                 tctx.font = isCur ? "bold 9px sans-serif" : "9px sans-serif";
                 tctx.fillText(layer.name, eyeX + 30, y + rowH / 2 + .5);
 
+                // reference badge
+                if (layer.kind === "ref") {
+                    tctx.fillStyle = "#6fb7ff"; tctx.font = "8px sans-serif";
+                    tctx.fillText("🔖", eyeX + 30 + tctx.measureText(layer.name).width + 4, y + rowH / 2 + .5);
+                }
+
                 // opacity badge
                 if (layer.opacity < 1) {
                     tctx.fillStyle = "#6f6f7e"; tctx.font = "7.5px sans-serif";
@@ -1911,7 +2062,8 @@ function createForge(node, config) {
                 for (let i = 0; i < curN; i++) {
                     const x = TL_GUTTER + i * cellW - off;
                     if (x + cellW < TL_GUTTER || x > W) continue;
-                    const fr = layer.frames[i];
+                    const fr = layer.frames[i] ||
+                        (layer.kind === "ref" ? layer.frames.find(f => f) : null);
                     const cw = cellW - 3, chh = rowH - 5;
                     const cx = x + 1, cy = y + 2;
 
@@ -2141,8 +2293,79 @@ function createForge(node, config) {
         clearTimeout(_drawnRefTimer);
         _drawnRefTimer = setTimeout(uploadDrawnRef, 600);
     }
+
+    // ---- gen-ref slots: push the ACTIVE layer's frame to <Picture 1/2> ----
+    async function pushLayerToRefSlot(slot) {
+        const layer = getActiveLayer();
+        if (!layer) return;
+        const fr = layer.frames[st.frame] || layer.frames.find(f => f);
+        const surf = frameSurf(fr);
+        if (!surf || !surfW(surf)) { console.info("[PixelForge] ref slot: active layer has no frame to push"); return; }
+        const wname = slot === "p1" ? "drawn_ref_image" : "drawn_ref_image_2";
+        const w = widgetByName(wname);
+        if (!w) { console.info("[PixelForge] ref slot: backend has no", wname, "widget (Super Forge?)"); return; }
+        const cv = document.createElement("canvas");
+        cv.width = surfW(surf); cv.height = surfH(surf);
+        const cx = cv.getContext("2d"); cx.imageSmoothingEnabled = false;
+        cx.drawImage(surf, 0, 0);
+        const blob = await new Promise(res => cv.toBlob(res, "image/png"));
+        if (!blob) return;
+        try {
+            const fd = new FormData();
+            fd.append("image", blob, `pf_refslot_${node.id}_${slot}_${Date.now().toString(36)}.png`);
+            fd.append("type", "temp");
+            fd.append("overwrite", "true");
+            const r = await fetch("/upload/image", { method: "POST", body: fd });
+            const j = await r.json();
+            if (j && j.name) {
+                setWidgetValue(w, j.name);
+                st.refSlots[slot] = j.name;
+                saveLayerProps(); refreshRefSlots();
+                console.info(`[PixelForge] ref slot ${slot} armed from layer "${layer.name}":`, j.name);
+            }
+        } catch (e) { console.warn("[PixelForge] ref slot push failed:", e); }
+    }
+    function clearRefSlot(slot) {
+        const wname = slot === "p1" ? "drawn_ref_image" : "drawn_ref_image_2";
+        const w = widgetByName(wname);
+        if (w) setWidgetValue(w, "");
+        st.refSlots[slot] = "";
+        saveLayerProps(); refreshRefSlots();
+    }
+
+    // ---- suite → widget sync (runs before every queued prompt) ----
+    // The placement dot and marquee are suite-side state; the backend reads
+    // them through the placement_x/y and selection_* widgets. Syncing at
+    // queue time keeps the widgets (workflow save / API) the single source
+    // of truth without spamming widget writes on every mouse move.
+    function syncSuiteWidgets() {
+        const comp = compositeFrame(st.frame);
+        const cw = comp && comp.width ? comp.width : 0;
+        const ch = comp && comp.height ? comp.height : 0;
+        let dx = 0, dy = 0;
+        if (st.placementDot && cw && ch) {
+            dx = Math.round(st.placementDot.x - cw / 2);
+            dy = Math.round(st.placementDot.y - ch / 2);
+        }
+        const wpx = widgetByName("placement_x"); if (wpx) setWidgetValue(wpx, dx);
+        const wpy = widgetByName("placement_y"); if (wpy) setWidgetValue(wpy, dy);
+        // normalize the marquee (drags can produce negative w/h)
+        let sx = 0, sy = 0, sw = 0, sh = 0;
+        if (st.marquee && (st.marquee.w || st.marquee.h)) {
+            const m = st.marquee;
+            sx = Math.round(Math.min(m.x, m.x + m.w));
+            sy = Math.round(Math.min(m.y, m.y + m.h));
+            sw = Math.round(Math.abs(m.w));
+            sh = Math.round(Math.abs(m.h));
+        }
+        const wsx = widgetByName("selection_x"); if (wsx) setWidgetValue(wsx, sx);
+        const wsy = widgetByName("selection_y"); if (wsy) setWidgetValue(wsy, sy);
+        const wsw = widgetByName("selection_w"); if (wsw) setWidgetValue(wsw, sw);
+        const wsh = widgetByName("selection_h"); if (wsh) setWidgetValue(wsh, sh);
+    }
     if (!window._pfDrawnRefUploads) window._pfDrawnRefUploads = new Set();
     window._pfDrawnRefUploads.add(uploadDrawnRef);
+    window._pfDrawnRefUploads.add(syncSuiteWidgets);
 
     function clientToSprite(cx, cy) {
         const r = canvas.getBoundingClientRect();

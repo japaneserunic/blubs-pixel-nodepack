@@ -166,8 +166,9 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 - [x] Tool palette (toolbar buttons): Pointer, Move, Marquee, Place, Draw
 - [x] **Pointer tool**: pan canvas (current behavior), click to deselect
 - [x] **Move tool**: click-drag to move active layer's content; cursor changes to 4-way arrow
-- [~] **Marquee tool**: click-drag selection rectangle + Escape/click-outside clear done;
-  constraining generation to the marquee box still TODO (needs backend `selection_box`)
+- [x] **Marquee tool**: click-drag selection rectangle + Escape/click-outside clear;
+  constrains the forge to the marquee box (synced to `selection_*` widgets at
+  queue time; final frames are cropped to the rect)
 - [~] **Placement dot**: draggable + toggleable done; pixel-grid snap + double-click reset TODO
 - [x] **Draw tool**: basic pixel painting on active layer
   - Left-click to paint with foreground color (brush color picker in toolbar)
@@ -190,19 +191,29 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 - [x] Generation targeting UI: dropdown in toolbar ("Gen→" New Layer / Current / layer names)
 - [x] Layer-aware preview: show composited result, not just one layer
 
-### Phase 8: Ref Input Support (Chain Studio-style ref genning) — NOT STARTED
-- [ ] Wire ref_image_2 input to layer system
-- [ ] Reference images can be placed as dedicated reference layers
-- [ ] Reference layers are locked + semi-transparent by default
-- [ ] Ref2va conditioning respects placement dot position
-  (note: drawn-stroke → ref upload plumbing exists from the drawnref work)
-- [ ] **Character-slot refs (Chain Studio parity)**: panel-driven character
-  slots become `<Picture i>` tags in generation order — no wiring, refs are
-  picked in the suite UI like Chain Studio's Refs panel (REF2VA mode)
+### Phase 8: Ref Input Support (Chain Studio-style ref genning) — mostly done
+- [x] Reference images can be placed as dedicated reference layers (🔖 toggle
+  on any layer, or 📥 import an image file straight into a ref layer)
+- [x] Reference layers are locked + semi-transparent by default (40% opacity;
+  single-frame refs show on every frame; never inflate the composite canvas;
+  imported refs re-fetch from temp after reload via persisted `refFile`)
+- [x] Ref2va conditioning respects placement dot position (suite syncs the
+  dot → `placement_x/y` widgets at queue time; `_load_drawn_ref` offsets the
+  ref by dot × integer upscale factor; also nudges fixed-canvas crops)
+- [x] **Character-slot refs (Chain Studio parity)**: gen-ref slots P1/P2 in
+  the layer bar — push the ACTIVE layer's current frame into `<Picture 1>` /
+  `<Picture 2>` (new hidden `drawn_ref_image_2` widget for slot 2; prompt
+  tags now follow the ACTUAL slots used, not a 1..N range). A wired socket
+  still wins over each slot.
+- [x] Drawn/painted layer content can be pushed straight into a ref slot
+  (draw it → P1/P2 → gen from it; drawn-ref composite toggle still works)
 - [ ] **Reference video clips → `<Video k>` tags**: attach a clip as a
   reference track for motion/style-anchored generation (vidref)
-- [ ] Drawn/painted layer content can be pushed straight into a ref slot
-  (draw it → gen from it)
+- [x] Generation targeting actually honored on ingest: Gen→ New/Current/
+  named layer fills in place (identity/transform/keyframes survive regen),
+  and USER layers (refs/imports/painted) are never wiped by executions
+- [x] Marquee → backend: suite syncs marquee → `selection_x/y/w/h` widgets
+  at queue time; the forge crops final frames to the selection rect
 
 ### Phase 9: Advanced Features — partially done
 - [ ] Chain Studio-style surgical regeneration:
