@@ -1,4 +1,4 @@
-/* VERSION: v3.5.3-probe (2026-08-16) — self-report pointer forensics (POST /pixelforge/probe); owner tests with ZERO commands
+/* VERSION: v3.5.4-fallback (2026-08-16) — manual-drive fallback when native range drags stall + deeper gesture forensics
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.5.3-probe — mask reaper + self-managed frame geometry + pointer forensics");
-const PFS_VERSION = "v3.5.3-probe";
+console.info("[PixelForge] pf_studio v3.5.4-fallback — native-stall-proof sliders + gesture forensics");
+const PFS_VERSION = "v3.5.4-fallback";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
@@ -127,6 +127,7 @@ if (!window.__pfsClickProbe) {
                     hit: __pfsElTag(hit),
                     covered: covered.length ? covered : undefined,
                     masks, locked,
+                    suites: document.querySelectorAll(".pfs-root").length,
                     stack: document.elementsFromPoint(x, y).slice(0, 4).map(__pfsElTag),
                 });
             }
@@ -1571,21 +1572,73 @@ function createForge(node, config) {
                 slider.addEventListener("pointerup", slideEnd);
                 slider.addEventListener("pointercancel", slideEnd);
                 window.addEventListener("pointerup", slideEnd);
-                // v3.5.3-probe: one gesture summary per drag + ungestured (keyboard)
-                // inputs, so a dead drag and a healthy drag are both visible in the log
-                let __g = null;
-                slider.addEventListener("pointerdown", () => { __g = { from: slider.value, inputs: 0, t0: Date.now() }; }, true);
+                // v3.5.4: manual-drive fallback + deep forensics. Owner's live tab:
+                // pointerdown LANDS on sliders but native drags produce ZERO input
+                // events (mechanism unknown; everything proven healthy in isolation).
+                // Native drag stays primary; if it stalls, we drive the value from
+                // pointer x ourselves, so the slider works regardless of the culprit.
+                let __activeG = 0;
                 slider.addEventListener("input", () => {
-                    if (__g) __g.inputs++;
-                    else __pfsProbe("nongesture-input", { widget: w.name, value: slider.value });
+                    if (__activeG === 0) __pfsProbe("nongesture-input", { widget: w.name, value: slider.value });
                 });
-                const __gEnd = () => {
-                    if (!__g) return;
-                    __pfsProbe("gesture", { widget: w.name, from: __g.from, to: slider.value, inputs: __g.inputs, ms: Date.now() - __g.t0 });
-                    __g = null;
-                };
-                slider.addEventListener("pointerup", __gEnd);
-                slider.addEventListener("pointercancel", __gEnd);
+                slider.addEventListener("pointerdown", (e) => {
+                    const g = { from: slider.value, moves: 0, native: 0, fell: 0, t0: Date.now(), endedBy: "?", capOk: false, driving: false };
+                    __activeG++;
+                    try { slider.setPointerCapture(e.pointerId); g.capOk = true; } catch (_) {}
+                    const stepN = parseFloat(slider.step) || 1;
+                    const minN = parseFloat(slider.min), maxN = parseFloat(slider.max);
+                    const drive = (clientX) => {
+                        const b = slider.getBoundingClientRect();
+                        if (!b.width) return;
+                        const frac = Math.min(1, Math.max(0, (clientX - b.left) / b.width));
+                        let v = minN + frac * (maxN - minN);
+                        v = Math.round(v / stepN) * stepN;
+                        v = parseFloat(v.toFixed(6));
+                        if (String(slider.value) !== String(v)) {
+                            slider.value = v;
+                            g.fell++;
+                            g.driving = true;
+                            slider.dispatchEvent(new Event("input", { bubbles: true }));
+                            g.driving = false;
+                        }
+                    };
+                    const onMove = (ev) => {
+                        g.moves++;
+                        if (g.native === 0 && g.moves >= 2) drive(ev.clientX);
+                    };
+                    const onInput = () => { if (!g.driving) g.native++; };
+                    const finish = (kind, ev) => {
+                        window.removeEventListener("pointermove", onMove, true);
+                        window.removeEventListener("pointerup", onUp, true);
+                        window.removeEventListener("pointercancel", onCancel, true);
+                        slider.removeEventListener("input", onInput);
+                        __activeG--;
+                        g.endedBy = kind;
+                        // dead click (no native response, no drag): drive once from x
+                        if (g.native === 0 && g.moves === 0) {
+                            drive(ev && ev.clientX != null ? ev.clientX : e.clientX);
+                        }
+                        const r = slider.getBoundingClientRect();
+                        const suites = document.querySelectorAll(".pfs-root").length;
+                        const from = g.from, to = slider.value, fell = g.fell,
+                            moves = g.moves, native = g.native, endedBy = g.endedBy,
+                            capOk = g.capOk, ms = Date.now() - g.t0,
+                            rect = [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)];
+                        setTimeout(() => {
+                            __pfsProbe("gesture2", {
+                                widget: w.name, from, to, wAfter: w.value,
+                                moves, native, fellBack: fell, endedBy, capOk, ms,
+                                rect, suites,
+                            });
+                        }, 250);
+                    };
+                    const onUp = (ev) => finish("up", ev);
+                    const onCancel = (ev) => finish("cancel", ev);
+                    window.addEventListener("pointermove", onMove, true);
+                    window.addEventListener("pointerup", onUp, true);
+                    window.addEventListener("pointercancel", onCancel, true);
+                    slider.addEventListener("input", onInput);
+                }, true);
                 row.appendChild(slider);
             }
             num.addEventListener("change", () => commit(num.value));
