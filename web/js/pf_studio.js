@@ -1,4 +1,4 @@
-/* VERSION: v3.5.0-ux1 (2026-08-16) — UX cleanup: plumbing filter, run button, multiline prompts, version chip
+/* VERSION: v3.5.2-authoritative (2026-08-16) — UX cleanup: plumbing filter, run button, multiline prompts, version chip
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.5.0-ux1 — BlockUI mask reaper active");
-const PFS_VERSION = "v3.5.0-ux1";
+console.info("[PixelForge] pf_studio v3.5.2-authoritative — mask reaper + self-managed frame geometry");
+const PFS_VERSION = "v3.5.2-authoritative";
 if (!window.__pfsMaskReaper) {
     const born = new WeakMap();
     window.__pfsMaskReaper = setInterval(() => {
@@ -3352,26 +3352,25 @@ function createForge(node, config) {
         const gh = wch - 2 * m;
         const dev = (a, b) => Math.abs((parseFloat(a) || 0) - b) > 1;
         const wrapPos = getComputedStyle(wrap).position;
-        // DEAD-OVERLAY FALLBACK (v3.2.1): "static" means the Vue DomWidgets
-        // overlay has NOT claimed this wrapper (its reactive style never
-        // landed — observed live: widgetStates stuck at pos 0,0/size 0,0, so
-        // the wrapper sat in normal flow at the page corner = "popped out of
-        // the node frame"). Give the overlay a few ticks to claim it, then
-        // take over the full geometry ourselves for the node's lifetime.
-        if (wrapPos === "static" && !st._selfPos) {
-            st._staticTicks = (st._staticTicks || 0) + 1;
-            if (st._staticTicks < 5) return;   // grace: let a healthy overlay claim it
-            st._selfPos = true;
-            if (st._installSelfPosSync) st._installSelfPosSync();
-        }
-        if (st._selfPos && wrapPos !== "absolute") {
-            // SELF-MANAGED mode: fixed positioning in client space, same
-            // math as the frontend's own canvasPosToClientPos + scale.
+        // SELF-MANAGED GEOMETRY (v3.5.2 — authoritative): the Vue DomWidgets
+        // overlay is too flaky for this widget — it claims the wrapper late,
+        // dies mid-session, and goes rAF-starved in background tabs — so WE
+        // own the wrapper geometry from creation. The math is litegraph's
+        // core convention, client = (canvasPos + offset) * scale, verified
+        // pixel-identical to the frontend's own writes when its overlay IS
+        // healthy, so an occasional foreign write lands on the same numbers
+        // and no fight is ever visible. (History: v3.5.0 added ds.offset
+        // AFTER scaling — any pan at scale != 1 drifted the suite off the
+        // node frame — and the yield/claim handshake oscillated ownership.
+        // That was the "suite keeps popping out of the node frame" glitch.)
+        if (wrapPos !== "absolute") {
             const ds2 = app.canvas.ds;
             if (!ds2) return;
+            st._selfPos = true;
+            if (st._installSelfPosSync) st._installSelfPosSync();
             const rect2 = app.canvas.canvas ? app.canvas.canvas.getBoundingClientRect() : { left: 0, top: 0 };
-            const gl2 = rect2.left + (node.pos[0] + m) * ds2.scale + ds2.offset[0];
-            const gt2 = rect2.top + (node.pos[1] + m + wy) * ds2.scale + ds2.offset[1];
+            const gl2 = rect2.left + (node.pos[0] + m + ds2.offset[0]) * ds2.scale;
+            const gt2 = rect2.top + (node.pos[1] + m + wy + ds2.offset[1]) * ds2.scale;
             const wantT2 = `scale(${ds2.scale})`;
             if (wrap.style.position !== "fixed") { wrap.style.position = "fixed"; wrap.style.zIndex = "5"; }
             if (dev(wrap.style.left, gl2) || dev(wrap.style.top, gt2) ||
@@ -3386,45 +3385,14 @@ function createForge(node, config) {
             }
             return;
         }
-        // Only position:fixed (and not our own self-managed writes) means a
-        // healthy Vue overlay owns the wrapper; position:absolute = legacy.
-        if (wrapPos === "fixed" && !st._selfPos) {
-            // VUE FRONTEND: position is frontend-owned and recomputed from
-            // live data on every draw via its own canvasPosToClientPos —
-            // always correct. NEVER write left/top/transform here: our view
-            // of ds.offset is not the frontend's client-space math, and
-            // writing position is what made the suite pop out of the node
-            // frame. Only the SIZE can go stale (via widget.width /
-            // computedHeight data drift), and only size is safe to correct:
-            // pin the data (above), nudge a redraw, and if the reactive
-            // writer is genuinely stuck, rewrite ONLY width/height inline.
-            if (dev(wrap.style.width, gw) || dev(wrap.style.height, gh)) {
-                // v3.2.1: no arrange()/setDirtyCanvas here — with the widget
-                // shield the overlay's own math already agrees with us, so a
-                // deviation is transient; forcing a full redraw looped with
-                // the overlay's reactive writes (the memory-churn war).
-                const now = Date.now();
-                if (now - (st._geomLogAt || 0) > 4000) {
-                    st._geomLogAt = now;
-                    console.info("[PixelForge] suite wrapper size corrected:", {
-                        was: { width: wrap.style.width, height: wrap.style.height },
-                        want: { width: gw, height: gh },
-                        node: { w: node.size[0], h: node.size[1], widgetY: wy, computedHeight: domWidget.computedHeight },
-                    });
-                }
-                wrap.style.width = gw + "px";
-                wrap.style.height = gh + "px";
-            }
-            return;
-        }
         // LEGACY frontend (absolute wrapper): we own the full geometry.
         // (Only reachable when position === "absolute" — real legacy.)
         if (wrapPos !== "absolute") return;
         const ds = app.canvas.ds;
         if (!ds) return;
         const rect = app.canvas.canvas ? app.canvas.canvas.getBoundingClientRect() : { left: 0, top: 0 };
-        const gl = rect.left + (node.pos[0] + m) * ds.scale + ds.offset[0];
-        const gt = rect.top + (node.pos[1] + m + wy) * ds.scale + ds.offset[1];
+        const gl = rect.left + (node.pos[0] + m + ds.offset[0]) * ds.scale;
+        const gt = rect.top + (node.pos[1] + m + wy + ds.offset[1]) * ds.scale;
         const wantT = `scale(${ds.scale})`;
         if (dev(wrap.style.left, gl) || dev(wrap.style.top, gt) ||
             dev(wrap.style.width, gw) || dev(wrap.style.height, gh) ||
@@ -3455,6 +3423,10 @@ function createForge(node, config) {
         app.canvas.canvas.addEventListener("pointermove", schedule, { passive: true });
         app.canvas.canvas.addEventListener("wheel", schedule, { passive: true });
     };
+
+    // First paint: position immediately, do not wait for the first tick.
+    syncWrapGeometry();
+    requestAnimationFrame(syncWrapGeometry);
 
     st._watch = setInterval(() => {
         if (!node.graph) return;
