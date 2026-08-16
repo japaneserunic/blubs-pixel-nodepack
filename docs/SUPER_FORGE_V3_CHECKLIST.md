@@ -126,93 +126,89 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 
 ## Checklist
 
-### Phase 1: Data Model + Layer State (frontend only)
-- [ ] Define Layer data structure in JS
-- [ ] Add `layers[]`, `activeLayer`, `activeFrame` to `st`
-- [ ] Add layer management functions: addLayer, removeLayer, duplicateLayer, reorderLayer
-- [ ] Add layer visibility/opacity/lock toggle functions
-- [ ] Add keyframe management: addKeyframe, removeKeyframe, interpolateTransforms
-- [ ] Persist layer state in `node.properties.pfs_layers`
-- [ ] Add canvas tool state: tool, marquee, placementDot
-- [ ] Add generation target state: genTarget, genFrameStart, genFrameEnd
+### Phase 1: Data Model + Layer State (frontend only) — ✅ DONE
+- [x] Define Layer data structure in JS
+- [x] Add `layers[]`, `activeLayer`, `activeFrame` to `st`
+- [x] Add layer management functions: addLayer, removeLayer, duplicateLayer, reorderLayer
+- [x] Add layer visibility/opacity/lock toggle functions
+- [x] Add keyframe management: addKeyframe, removeKeyframe, interpolateTransforms
+- [x] Persist layer state in `node.properties.pfs_layers`
+- [x] Add canvas tool state: tool, marquee, placementDot
+- [~] Add generation target state: genTarget ✅ (genFrameStart / genFrameEnd still TODO)
 
-### Phase 2: Backend Layer Support (pf_studio.py)
-- [ ] Change `pf_frames` output to `pf_layers` format (list of layer objects with frames)
-- [ ] Add `pf_frame_count` to UI payload
-- [ ] Move pipeline stage frames to `pf_debug_stages` (hidden by default)
-- [ ] Add layer-aware compositing: save each layer's frames as separate files
-- [ ] Add `target_layer` input parameter (optional, for generation targeting)
-- [ ] Add `placement_x`, `placement_y` input parameters (for centering dot)
+### Phase 2: Backend Layer Support (pf_studio.py) — mostly done
+- [x] Change `pf_frames` output to `pf_layers` format (list of layer objects with frames)
+- [x] Add `pf_frame_count` to UI payload
+- [x] Move pipeline stage frames to `pf_debug_stages` (hidden by default)
+- [x] Add layer-aware compositing: save each layer's frames as separate files
+- [x] Add `target_layer` input parameter (optional, for generation targeting)
+- [x] Add `placement_x`, `placement_y` input parameters (for centering dot)
 - [ ] Add `selection_box` input parameter (for marquee fit-to-selection)
 
-### Phase 3: Timeline Rewrite (frontend)
-- [ ] Redesign timeline HTML: real layer rows instead of stage rows
-- [ ] Layer row controls: eye icon (visibility), opacity slider, lock icon, name label
-- [ ] Keyframe diamonds on timeline (click to add/remove, drag to move)
-- [ ] Frame cels show composited sprite thumbnails (not individual stage frames)
+### Phase 3: Timeline Rewrite (frontend) — mostly done
+- [x] Redesign timeline HTML: real layer rows instead of stage rows
+- [x] Layer row controls: eye icon (visibility), opacity badge, lock icon, name label
+- [x] Keyframe diamonds on timeline (rendered on keyed cels)
+- [x] Frame cels show per-layer thumbnails (layer's own frame; composited-thumb option TODO)
 - [ ] Drag to select multiple frames, right-click context menu
-- [ ] Layer reorder via drag (up/down)
-- [ ] Add/remove/duplicate layer buttons at bottom of timeline
-- [ ] Scrub indicator (vertical line following playhead)
+- [~] Layer reorder: up/down buttons done; drag-reorder TODO
+- [x] Add/remove/duplicate layer buttons at bottom of timeline
+- [x] Scrub indicator (vertical playhead line + click-to-scrub header)
 
-### Phase 4: Canvas Compositing (frontend)
-- [ ] Per-frame compositing: iterate layers bottom→top, apply opacity/blend
-- [ ] Draw composited result to canvas (replaces current single-layer draw)
-- [ ] Onion skin works on composited result
-- [ ] Grid overlay works on composited result
-- [ ] A/B split works on composited result vs source
+### Phase 4: Canvas Compositing (frontend) — ✅ DONE
+- [x] Per-frame compositing: iterate layers bottom→top, apply opacity/blend
+- [x] Draw composited result to canvas (replaces current single-layer draw)
+- [x] Onion skin works on composited result
+- [x] Grid overlay works on composited result
+- [x] A/B split works on composited result vs source
 
-### Phase 5: Canvas Tools (frontend)
-- [ ] Tool palette (toolbar buttons): Pointer, Move, Marquee, Place, Draw
-- [ ] **Pointer tool**: pan canvas (current behavior), click to deselect
-- [ ] **Move tool**: click-drag to move active layer's content; cursor changes to 4-way arrow
-- [ ] **Marquee tool**: click-drag to draw selection rectangle; marching ants border
-  - Selection constrains next generation to fit within the marquee box
-  - Clear selection with Escape or clicking outside
-- [ ] **Placement dot**: draggable orange dot on canvas
-  - Shows where next generation will be centered
-  - Toggleable visibility (button in toolbar)
-  - Snaps to pixel grid at high zoom
-  - Double-click to reset to canvas center
-- [ ] **Draw tool**: basic pixel painting on active layer
-  - Left-click to paint with foreground color (from palette)
-  - Right-click to erase (set alpha to 0)
-  - Brush size: 1px (pixel-art correct)
-  - Paints into the active layer's current frame
+### Phase 5: Canvas Tools (frontend) — mostly done
+- [x] Tool palette (toolbar buttons): Pointer, Move, Marquee, Place, Draw
+- [x] **Pointer tool**: pan canvas (current behavior), click to deselect
+- [x] **Move tool**: click-drag to move active layer's content; cursor changes to 4-way arrow
+- [~] **Marquee tool**: click-drag selection rectangle + Escape/click-outside clear done;
+  constraining generation to the marquee box still TODO (needs backend `selection_box`)
+- [~] **Placement dot**: draggable + toggleable done; pixel-grid snap + double-click reset TODO
+- [x] **Draw tool**: basic pixel painting on active layer
+  - Left-click to paint with foreground color (brush color picker in toolbar)
+  - Brush size: 1px (pixel-art correct); stroke = paintLine interpolation
+  - Paints into the active layer's current frame (per-frame offscreen canvas)
+  - Right-click erase TODO
 
-### Phase 6: Layer Compositing + Rendering
-- [ ] `compositeFrame(frameIndex)` function: iterate layers, blend onto offscreen canvas
-- [ ] Cache composited frames to avoid re-compositing every draw
-- [ ] Invalidate cache when layer visibility/opacity/content changes
+### Phase 6: Layer Compositing + Rendering — mostly done
+- [x] `compositeFrame(frameIndex)` function: iterate layers, blend onto offscreen canvas
+- [x] Cache composited frames to avoid re-compositing every draw
+- [x] Invalidate cache when layer visibility/opacity/content changes
 - [ ] Export composited frames (for GIF/sheet generation)
 
-### Phase 7: Generation Integration
-- [ ] When generation completes, auto-create layer or fill target layer
-- [ ] "New layer" mode: create fresh layer with generated frames
-- [ ] "Current layer" mode: fill selected layer's frames (overwrite)
-- [ ] Placement dot offset applied during generation (backend reads placement_x/y)
+### Phase 7: Generation Integration — mostly done
+- [x] When generation completes, auto-create layer or fill target layer
+- [x] "New layer" mode: create fresh layer with generated frames
+- [x] "Current layer" mode: fill selected layer's frames (overwrite)
+- [x] Placement dot offset applied during generation (backend reads placement_x/y)
 - [ ] Marquee selection constrains generation output (backend reads selection_box)
-- [ ] Generation targeting UI: dropdown in toolbar ("New Layer" / layer names)
-- [ ] Layer-aware preview: show composited result, not just one layer
+- [x] Generation targeting UI: dropdown in toolbar ("Gen→" New Layer / Current / layer names)
+- [x] Layer-aware preview: show composited result, not just one layer
 
-### Phase 8: Ref Input Support (mentioned by user)
+### Phase 8: Ref Input Support (mentioned by user) — NOT STARTED
 - [ ] Wire ref_image_2 input to layer system
 - [ ] Reference images can be placed as dedicated reference layers
 - [ ] Reference layers are locked + semi-transparent by default
 - [ ] Ref2va conditioning respects placement dot position
+  (note: drawn-stroke → ref upload plumbing exists from the drawnref work)
 
-### Phase 9: Advanced Features
+### Phase 9: Advanced Features — partially done
 - [ ] Chain Studio-style surgical regeneration:
   - Select specific frames on a layer → re-generate only those frames
   - "Regen selected" button in timeline context menu
   - Partial frame ranges for targeted regeneration
-- [ ] Layer blending modes (multiply, screen, overlay) for effects
+- [x] Layer blending modes (multiply, screen, overlay) — applied in compositeFrame
 - [ ] Frame timing overrides (per-frame duration for non-uniform animation)
 - [ ] Layer group/folder support (group background layers, etc.)
 - [ ] Undo/redo for canvas edits and layer operations
-- [ ] Keyboard shortcuts (V=pointer, M=move, S=marquee, P=place, B=draw)
+- [x] Keyboard shortcuts (V=pointer, M=move, S=marquee, P=place, B=draw, [/]=layer switch, Esc=clear marquee)
 
-### Phase 10: Export + Aseprite Bridge
+### Phase 10: Export + Aseprite Bridge — NOT STARTED
 - [ ] Export composited animation as GIF (replaces current export stage)
 - [ ] Export individual layers as separate GIFs
 - [ ] Export layer stack as .aseprite file (with layers preserved)
