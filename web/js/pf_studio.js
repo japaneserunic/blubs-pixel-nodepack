@@ -1,4 +1,4 @@
-/* VERSION: v3.4.4-maskleak2 (2026-08-16) — force cache bust
+/* VERSION: v3.5.0-ux1 (2026-08-16) — UX cleanup: plumbing filter, run button, multiline prompts, version chip
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -73,7 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.4.4-maskleak2 — BlockUI mask reaper active");
+console.info("[PixelForge] pf_studio v3.5.0-ux1 — BlockUI mask reaper active");
+const PFS_VERSION = "v3.5.0-ux1";
 if (!window.__pfsMaskReaper) {
     const born = new WeakMap();
     window.__pfsMaskReaper = setInterval(() => {
@@ -116,6 +117,20 @@ const STAGE_LABELS = {
     export: "Export", sheet: "Sheet",
 };
 const STAGE_ORDER_FALLBACK = ["source", "keyed", "grid", "look", "motion", "final"];
+
+// Suite-internal sync widgets: written at queue time by the suite itself
+// (gen targeting, placement dot, marquee, ref slots, prompt lane). They must
+// stay on node.widgets (they go into the prompt) but NEVER get panel rows —
+// raw JSON/filename rows confuse and editing them breaks sync.
+const PFS_INTERNAL = new Set([
+    "target_layer", "layer_name", "placement_x", "placement_y",
+    "selection_x", "selection_y", "selection_w", "selection_h",
+    "drawn_ref_image", "drawn_ref_image_2", "ref_video_1",
+    "prompt_segments", "gen_win_start",
+]);
+// Prompt fields that deserve a multiline box even when the backend def
+// does not mark them multiline.
+const PFS_MULTILINE = new Set(["character", "action", "style"]);
 
 // The 9 mains — always visible at the top of the Forge tab.
 const QUICK = [
@@ -224,6 +239,11 @@ const STYLES = `
     padding:0 4px; white-space:nowrap; }
 .pfs-color { width:20px; height:20px; padding:0; border:1px solid #2a2a35;
     border-radius:4px; background:#0b0b11; cursor:pointer; }
+.pfs-runbtn { background:#3a2c1a; border:1px solid #ff9d45; color:#ff9d45;
+    font-weight:700; letter-spacing:.4px; padding:3px 12px; }
+.pfs-runbtn:hover { background:#ff9d45; color:#0e0e14; }
+.pfs-ver { font-size:8.5px; color:#555566; padding:0 6px; user-select:none;
+    font-variant-numeric:tabular-nums; }
 
 /* ---- socket strip (top pins, integrated into the suite) ---- */
 .pfs-sockbar { display:flex; align-items:center; gap:4px; padding:3px 8px;
@@ -1082,6 +1102,7 @@ function createForge(node, config) {
         st.genTarget = genTargetSel.value;
         saveLayerProps();
     });
+    genTargetSel.title = "Which layer receives newly forged frames (New Layer / Current / a named layer)";
     genTargetSel.addEventListener("pointerdown", (e) => e.stopPropagation());
     genTargetWrap.append(genTargetLbl, genTargetSel);
 
@@ -1230,6 +1251,19 @@ function createForge(node, config) {
     }, true);
     btnSocks.classList.toggle("on", !!st.showSockets);
     bar.appendChild(mkCluster(btnSocks));
+    // Primary action: run the forge from inside the suite. Goes through
+    // app.queuePrompt (wrapped below) so layers/refs/marquee/prompt-lane
+    // all sync to widgets before the prompt is built.
+    const btnRun = mkBtn("⚡ Forge", "Run the forge — same as ComfyUI Run, but syncs the\n" +
+        "suite first (layers, refs, placement dot, marquee, prompt lane).", () => {
+        app.queuePrompt();
+    }, false, "pfs-btn pfs-runbtn");
+    const verChip = document.createElement("span");
+    verChip.className = "pfs-ver"; verChip.textContent = PFS_VERSION;
+    verChip.title = "Suite build version — if support asks, read this";
+    bar.appendChild(mkSep());
+    bar.appendChild(btnRun);
+    bar.appendChild(verChip);
     sockBar.classList.toggle("hide", !st.showSockets);
 
     let flipToForgeTab = null;   // assigned when the One Forge tab strip is built
@@ -1402,6 +1436,7 @@ function createForge(node, config) {
                 ctl.appendChild(o);
             }
             ctl.value = w.value;
+            if (w.options && w.options.tooltip) ctl.title = w.options.tooltip;
             ctl.addEventListener("change", () => setWidgetValue(w, ctl.value));
             sync = () => { if (String(ctl.value) !== String(w.value)) ctl.value = w.value; };
             row.appendChild(ctl);
@@ -1411,7 +1446,7 @@ function createForge(node, config) {
             sync = () => { if (ctl.checked !== !!w.value) ctl.checked = !!w.value; };
             row.appendChild(ctl);
         } else if (typeof w.value === "string") {
-            if (w.options && w.options.multiline) {
+            if ((w.options && w.options.multiline) || PFS_MULTILINE.has(w.name)) {
                 row.classList.add("wrap");
                 ctl = document.createElement("textarea");
                 ctl.className = "pfs-ta"; ctl.rows = 2; ctl.value = w.value;
@@ -1568,7 +1603,7 @@ function createForge(node, config) {
 
     // safety net: anything unlisted still gets a home (the DOM widget isn't
     // in node.widgets yet at this point — addDOMWidget runs below)
-    const extra = (node.widgets || []).filter(w => !claimed.has(w.name));
+    const extra = (node.widgets || []).filter(w => !claimed.has(w.name) && !PFS_INTERNAL.has(w.name));
     if (extra.length) {
         const det = document.createElement("details"); det.className = "pfs-details";
         const sum = document.createElement("summary"); sum.textContent = "More Parameters";

@@ -358,3 +358,27 @@ animations are chained clips instead of one drifting mega-gen:
 6. **Backward compatible**: The backend still returns frames — the frontend just interprets them as a single default layer. Existing workflows continue to work.
 
 7. **Chain Studio parity for genning**: Refs, prompting, and continuation follow the ComfyUI-H3-Motion-Context Chain Studio model — panel-driven character slots (`<Picture i>`), reference video tracks (`<Video k>`), a global prompt + timeline prompt lane, and clip-chain continuation/regen via the H3 Motion Context engine (shared chain folder format, so chains made in either UI work in both). The Super Forge becomes the sprite-side editor on top of the same chain: gen/continue/regen in H3 land, then the forge pipeline pixelizes each clip onto its layer.
+
+---
+
+## Phase 12: UX Cleanup (v3.5.0) — 2026-08-16
+
+Owner feedback after Phase 8-9 landed: several spots confusing / not
+straight-forward; some sliders appeared stuck (rooted separately — PrimeVue
+BlockUI mask, v3.4.3/v3.4.4).
+
+- [ ] **Plumbing leak**: 'More Parameters' section exposed 13 suite-internal
+  sync widgets (target_layer, layer_name, placement_x/y, selection_x/y/w/h,
+  drawn_ref_image, drawn_ref_image_2, ref_video_1, prompt_segments,
+  gen_win_start) as editable rows — raw JSON/filenames, editing breaks sync.
+  Filter them out of the panel (they stay on node.widgets for the prompt).
+- [ ] **No Run button**: the suite had no way to queue — you had to find
+  ComfyUI's own Run. Prominent ⚡ Forge button in the top bar (calls the
+  wrapped queuePrompt, so layer/ref/marquee/prompt-lane sync still runs first).
+- [ ] **Prompt fields single-line**: character/action/style render as proper
+  multiline textareas.
+- [ ] **Version chip**: suite header shows the running version (v3.5.0) so
+  stale-cache questions are answerable by looking at the node, no F12.
+- [ ] **Tooltip gaps**: combo selects inherit widget tooltips; Gen→ dropdown
+  gets one.
+- [ ] Verify live over CDP: clean load, no console errors, all controls render.
