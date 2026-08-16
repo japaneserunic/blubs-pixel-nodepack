@@ -1,4 +1,4 @@
-/* VERSION: v3.3.0-reflayers (2026-08-16) — force cache bust
+/* VERSION: v3.4.0-autoref (2026-08-16) — force cache bust
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -944,8 +944,10 @@ function createForge(node, config) {
     });
     // Reference toggle: mark the active layer as a guide layer — locked,
     // 40% opacity, single frame shows on every frame, survives executions.
-    const btnLyrRef = mkLyrBtn("🔖", "Mark active layer as a REFERENCE guide (locked, "
+    const btnLyrRef = mkLyrBtn("🔖", "Mark active layer as a REFERENCE layer (locked, "
         + "40% opacity, shows on all frames, never wiped by generations). "
+        + "A VISIBLE ref layer automatically feeds the generation as <Picture 1>/<Picture 2> "
+        + "(watch the blue P1/P2 badge on its row) — hide it to take it out of the gen. "
         + "Click again to turn it back into a normal layer.", () => {
         const l = getActiveLayer(); if (!l) return;
         if (l.kind === "ref") {
@@ -954,7 +956,7 @@ function createForge(node, config) {
             l.kind = "ref"; l.locked = true; l.opacity = 0.4;
             if (!l.source || l.source === "forge") l.source = "user";
         }
-        _invalidateAllComposites(); saveLayerProps(); refreshLayerBar(); draw(); drawTl();
+        _invalidateAllComposites(); saveLayerProps(); refreshLayerBar(); refreshRefSlots(); draw(); drawTl();
     });
     // Import an image file as a reference layer (character sheets, pose refs)
     const fileIn = document.createElement("input");
@@ -979,13 +981,16 @@ function createForge(node, config) {
                       locked: true, opacity: 0.4 });
                 layer.frames[0] = { img: im, source: "imported" };
                 _recalcTotalFrames(); _invalidateAllComposites();
-                saveLayerProps(); refreshLayerBar(); draw(); drawTl();
+                saveLayerProps(); refreshLayerBar(); refreshRefSlots(); draw(); drawTl();
+                console.info(`[PixelForge] ref imported: "${layer.name}" — visible ref layers `
+                    + `auto-feed the gen as <Picture 1>/<Picture 2> (blue badge on the row)`);
             };
         } catch (e) { console.warn("[PixelForge] ref import failed:", e); }
     });
     const btnLyrImport = mkLyrBtn("📥", "Import an image as a reference layer "
-        + "(character sheet, pose ref — placed as a locked guide you can trace "
-        + "or push into a gen-ref slot)", () => fileIn.click());
+        + "(character sheet, pose ref). It lands as a locked guide layer AND automatically "
+        + "feeds the generation as <Picture 1>/<Picture 2> while visible — the row badge "
+        + "shows which slot. Hide the layer to take it out of the gen.", () => fileIn.click());
     root.appendChild(fileIn);
 
     // Opacity slider for active layer
@@ -1077,14 +1082,23 @@ function createForge(node, config) {
     });
     refSlotWrap.appendChild(btnVidRef);
     function refreshRefSlots() {
+        const binds = computeRefBinds();
+        const autoFor = { p1: null, p2: null };
+        for (const lid of Object.keys(binds)) autoFor[binds[lid]] = lid;
         for (const slot of ["p1", "p2"]) {
             const b = refSlotBtns[slot];
+            const tag = slot === "p1" ? "<Picture 1>" : "<Picture 2>";
             const armed = !!st.refSlots[slot];
+            const autoL = armed ? null
+                : (st.layers.find(l => l.id === autoFor[slot]) || null);
             b.classList.toggle("on", armed);
-            b.style.color = armed ? "#ff9d45" : "";
+            // orange glow = manual push, blue = auto-bound ref layer
+            b.style.color = armed ? "#ff9d45" : (autoL ? "#6fb7ff" : "");
             b.title = armed
-                ? `${slot.toUpperCase()} armed: ${st.refSlots[slot]} — click to clear, or re-push after editing the layer`
-                : `Gen-ref slot: push the ACTIVE layer's current frame as ${slot === "p1" ? "<Picture 1>" : "<Picture 2>"}`;
+                ? `${slot.toUpperCase()} armed (manual): ${st.refSlots[slot]} — click to clear, or re-push after editing the layer`
+                : autoL
+                    ? `${slot.toUpperCase()} auto: ref layer "${autoL.name}" feeds ${tag} at queue time. Click to push the ACTIVE layer's frame instead (manual override).`
+                    : `Gen-ref slot ${tag}: visible 🔖 ref layers fill free slots automatically — or click to push the ACTIVE layer's frame manually.`;
         }
         const varmed = !!st.vidRef;
         btnVidRef.classList.toggle("on", varmed);
@@ -2135,16 +2149,26 @@ function createForge(node, config) {
                 tctx.font = isCur ? "bold 9px sans-serif" : "9px sans-serif";
                 tctx.fillText(layer.name, eyeX + 30, y + rowH / 2 + .5);
 
-                // reference badge
+                // badges (advance x so they never overlap)
+                let badgeX = eyeX + 30 + tctx.measureText(layer.name).width + 4;
+                // reference badge — shows which <Picture> slot the layer feeds
                 if (layer.kind === "ref") {
-                    tctx.fillStyle = "#6fb7ff"; tctx.font = "8px sans-serif";
-                    tctx.fillText("🔖", eyeX + 30 + tctx.measureText(layer.name).width + 4, y + rowH / 2 + .5);
+                    const slot = computeRefBinds()[layer.id];
+                    tctx.font = "8px sans-serif";
+                    const label = "🔖" + (slot ? slot.toUpperCase() : "");
+                    // bright blue = bound to a gen slot; dim = guide-only
+                    // (hidden, or both slots taken by manual pushes)
+                    tctx.fillStyle = slot ? "#6fb7ff" : "#3f5a78";
+                    tctx.fillText(label, badgeX, y + rowH / 2 + .5);
+                    badgeX += tctx.measureText(label).width + 5;
                 }
 
                 // opacity badge
                 if (layer.opacity < 1) {
                     tctx.fillStyle = "#6f6f7e"; tctx.font = "7.5px sans-serif";
-                    tctx.fillText(Math.round(layer.opacity * 100) + "%", eyeX + 30 + tctx.measureText(layer.name).width + 4, y + rowH / 2 + .5);
+                    const label = Math.round(layer.opacity * 100) + "%";
+                    tctx.fillText(label, badgeX, y + rowH / 2 + .5);
+                    badgeX += tctx.measureText(label).width + 5;
                 }
 
                 // frame cels
@@ -2286,6 +2310,7 @@ function createForge(node, config) {
                     layer.visible = !layer.visible;
                     _invalidateAllComposites();
                     saveLayerProps();
+                    if (layer.kind === "ref") refreshRefSlots();
                     draw(); drawTl();
                     return;
                 }
@@ -2460,6 +2485,84 @@ function createForge(node, config) {
         if (w) setWidgetValue(w, "");
         st.vidRef = "";
         saveLayerProps(); refreshRefSlots();
+    }
+
+    // ---- auto-bind: visible 🔖 ref layers ARE the gen refs ----
+    // One mental model: a visible ref layer feeds the generation as
+    // <Picture 1> / <Picture 2> automatically (layer order, bottom→top).
+    // Manual P1/P2 pushes and the ✎⤴ drawn-ref toggle are overrides that
+    // own their slot; auto-bind only fills the FREE slots. Hidden layers
+    // are skipped; deleting/hiding/un-🔖-ing a layer unbinds it next queue.
+    function layerRefSurf(layer) {
+        if (!layer || layer.kind !== "ref") return null;
+        const fr = (layer.frames || []).find(f => f && frameSurf(f) && surfW(frameSurf(f)));
+        return fr ? frameSurf(fr) : null;
+    }
+    function computeRefBinds() {
+        // returns { layerId: "p1"|"p2" } — the auto (non-manual) bindings
+        const p1Taken = !!st.refSlots.p1 || !!(st.drawnRef && hasDrawing());
+        const p2Taken = !!st.refSlots.p2;
+        const binds = {};
+        const refs = st.layers.filter(l => l && l.kind === "ref"
+            && l.visible !== false && layerRefSurf(l));
+        let ri = 0;
+        for (const slot of ["p1", "p2"]) {
+            if (slot === "p1" ? p1Taken : p2Taken) continue;
+            if (ri < refs.length) binds[refs[ri++].id] = slot;
+        }
+        return binds;
+    }
+    let _autoRefSeq = 0;
+    async function autoBindRefLayers() {
+        const w1 = widgetByName("drawn_ref_image");
+        if (!w1) return;  // Super Forge node: no ref widgets — nothing to do
+        const w2 = widgetByName("drawn_ref_image_2");
+        const binds = computeRefBinds();
+        if (!st._autoRefs) st._autoRefs = { p1: "", p2: "" };
+        for (const slot of ["p1", "p2"]) {
+            const w = slot === "p1" ? w1 : w2;
+            if (!w) continue;
+            const manual = !!st.refSlots[slot]
+                || (slot === "p1" && st.drawnRef && hasDrawing());
+            if (manual) { st._autoRefs[slot] = ""; continue; }  // override owns the slot
+            const lid = Object.keys(binds).find(k => binds[k] === slot);
+            const layer = lid ? st.layers.find(l => l.id === lid) : null;
+            let name = "";
+            if (layer) {
+                // Imported PNGs already live in the temp dir — reuse the file
+                // directly (no re-upload, stable name). Anything else (jpg/webp
+                // import, painted ref) is re-encoded to PNG so the backend's
+                // .png-only loader + alpha bbox-crop always work.
+                if (layer.refFile && /\.png$/i.test(layer.refFile)) {
+                    name = layer.refFile;
+                } else {
+                    const surf = layerRefSurf(layer);
+                    const cv = document.createElement("canvas");
+                    cv.width = surfW(surf); cv.height = surfH(surf);
+                    const cx = cv.getContext("2d"); cx.imageSmoothingEnabled = false;
+                    cx.drawImage(surf, 0, 0);
+                    const blob = await new Promise(res => cv.toBlob(res, "image/png"));
+                    if (blob) {
+                        try {
+                            const fd = new FormData();
+                            fd.append("image", blob, `pf_autoref_${node.id}_${slot}_${Date.now().toString(36)}_${++_autoRefSeq}.png`);
+                            fd.append("type", "temp");
+                            fd.append("overwrite", "true");
+                            const r = await fetch("/upload/image", { method: "POST", body: fd });
+                            const j = await r.json();
+                            if (j && j.name) name = j.name;
+                        } catch (e) { console.warn("[PixelForge] auto-ref upload failed:", e); }
+                    }
+                }
+            }
+            // Only touch the widget when we have a fresh bind, or when WE set
+            // the previous value (st._autoRefs) — never clobber anything else.
+            if (name || st._autoRefs[slot]) {
+                if ((w.value || "") !== name) setWidgetValue(w, name);
+                st._autoRefs[slot] = name;
+                if (name) console.info(`[PixelForge] auto-ref: layer "${layer.name}" -> <Picture ${slot === "p1" ? 1 : 2}>`);
+            }
+        }
     }
 
     // ==================== Phase 9: cel ops + surgical regen + prompt lane ====
@@ -2768,6 +2871,7 @@ function createForge(node, config) {
     if (!window._pfDrawnRefUploads) window._pfDrawnRefUploads = new Set();
     window._pfDrawnRefUploads.add(uploadDrawnRef);
     window._pfDrawnRefUploads.add(syncSuiteWidgets);
+    window._pfDrawnRefUploads.add(autoBindRefLayers);
 
     function clientToSprite(cx, cy) {
         const r = canvas.getBoundingClientRect();
