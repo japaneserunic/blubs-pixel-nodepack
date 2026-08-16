@@ -40,6 +40,9 @@ from PIL import Image
 from .pf_easy import PixelForgeEasyExport, PixelForgeEasyPrompt, _BACKGROUNDS
 from .pf_sampler import PixelForgeH3FlatSigmas, PixelForgeH3PixelSampler
 from .pf_studio import PixelForgeSuperForge, _save_stage
+# v3.6.0-bgsync uses these for the backdrop-synced gen prompt (the edit that
+# introduced the call sites forgot this import — NameError on first Forge).
+from .pf_h3 import FPS as _H3_FPS, PixelForgeH3Prompt, clause_for_hex
 
 log = logging.getLogger(__name__)
 
