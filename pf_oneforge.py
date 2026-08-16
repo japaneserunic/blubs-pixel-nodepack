@@ -25,6 +25,7 @@ audio_vae is never needed in-process.
 """
 
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -245,6 +246,43 @@ def _load_ref_video(name, fps=24.0, max_seconds=15.0):
         log.warning("[OneForge] video ref load failed for %r: %s", name, e)
         return None
 
+
+# -------------------------------------------------------------- prompt lane
+def _assemble_lane_prompts(base, segments_json, win_start, win_len):
+    """Chain Studio prompt-lane parity: per-segment prompt clips on the
+    suite's timeline lane that overlap the gen window append to the base
+    prompt in timeline order. Window is [win_start, win_start + win_len)
+    in timeline frames (win_start = 0 for a full gen; the surgical-regen
+    offset otherwise). Empty/duplicate segments are skipped. <Picture i> /
+    <Video k> tags in segment text pass straight through — the ref binder
+    below only auto-binds tags the final prompt doesn't already name."""
+    try:
+        segs = json.loads(segments_json or "[]")
+        if not isinstance(segs, list):
+            return base, 0
+    except Exception:
+        return base, 0
+    start = int(win_start or 0)
+    end = start + max(1, int(win_len or 0))
+    parts = []
+    for s in sorted((x for x in segs if isinstance(x, dict)),
+                    key=lambda x: x.get("start", 0)):
+        p = str(s.get("prompt") or "").strip()
+        if not p:
+            continue
+        try:
+            ss, se = int(s.get("start") or 0), int(s.get("end") or 0)
+        except Exception:
+            continue
+        if se <= ss or ss >= end or se <= start:
+            continue  # degenerate or no overlap with the gen window
+        if p not in parts:
+            parts.append(p)
+    out = base or ""
+    for p in parts:
+        out = p if not out else out.rstrip(".") + ". " + p
+    return out, len(parts)
+
 # ==================================================================== node
 class PixelForgeOneForge:
     """Prompt in one end, game-ready sprite out the other. One node, no wires."""
@@ -357,6 +395,20 @@ class PixelForgeOneForge:
                             "tooltip": "Suite video reference (input-dir filename). Set by the "
                                        "suite's V1 button; becomes <Video 1> in the ref2va "
                                        "conditioning — anchors motion/style. 2-15s clips, silent."}),
+            # Timeline prompt lane (Chain Studio parity): JSON list of
+            # {start, end, prompt} segment clips. Segments overlapping the
+            # gen window append to the base prompt in timeline order.
+            # MUST stay after ref_video_1 (widget-value alignment).
+            "prompt_segments": ("STRING", {"default": "[]",
+                                "tooltip": "Suite prompt lane (JSON). Set by the suite timeline; "
+                                           "overlapping segment prompts append to the base prompt "
+                                           "in timeline order."}),
+            # Gen window offset (timeline frames) — nonzero only for
+            # surgical regen. MUST stay last.
+            "gen_win_start": ("INT", {"default": 0, "min": 0, "max": 999999,
+                              "tooltip": "Suite gen-window start frame (0 = full gen). Set by the "
+                                         "suite's surgical regen; selects which prompt-lane "
+                                         "segments overlap."}),
         }
         required = {}
         required.update(gen)
@@ -382,6 +434,7 @@ class PixelForgeOneForge:
             filename_prefix, export_fps, make_gif, gif_size, make_sheet,
             sheet_columns, sheet_bg, build_aseprite, aseprite_path,
             drawn_ref_image="", drawn_ref_image_2="", ref_video_1="",
+            prompt_segments="[]", gen_win_start=0,
             images=None, first_frame=None, ref_image_2=None,
             alpha=None, custom_palette_image=None,
             **forge):
@@ -391,6 +444,12 @@ class PixelForgeOneForge:
         if images is None:
             prompt, length, _pfps = PixelForgeEasyPrompt().run(
                 character, action, style, seconds, seamless_loop)
+            # Prompt lane: overlapping timeline segments append in order
+            # (Chain Studio parity). gen_win_start is the regen offset.
+            prompt, _lane_n = _assemble_lane_prompts(
+                prompt, prompt_segments, gen_win_start, length)
+            if _lane_n:
+                log_lines.append(f"prompt lane: +{_lane_n} segment(s)")
             wh = _SIZE_PRESETS.get(gen_size)
             width, height = wh if wh else (gen_width, gen_height)
             log_lines.append(f"prompt: {length}f @ {width}x{height}")

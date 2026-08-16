@@ -134,7 +134,8 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 - [x] Add keyframe management: addKeyframe, removeKeyframe, interpolateTransforms
 - [x] Persist layer state in `node.properties.pfs_layers`
 - [x] Add canvas tool state: tool, marquee, placementDot
-- [~] Add generation target state: genTarget ✅ (genFrameStart / genFrameEnd still TODO)
+- [x] Add generation target state: genTarget ✅ + genFrameStart/End via the
+  surgical-regen window (regenWindow state + gen_win_start widget, Phase 9)
 
 ### Phase 2: Backend Layer Support (pf_studio.py) — mostly done
 - [x] Change `pf_frames` output to `pf_layers` format (list of layer objects with frames)
@@ -221,17 +222,26 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
   at queue time; the forge crops final frames to the selection rect
 
 ### Phase 9: Advanced Features — partially done
-- [ ] Chain Studio-style surgical regeneration:
-  - Select specific frames on a layer → re-generate only those frames
-  - "Regen selected" button in timeline context menu
-  - Partial frame ranges for targeted regeneration
-- [ ] **Timeline right-click context menu (smooth, Chain Studio-style)**:
-  regen this clip/frame range · continue chain from here · use as context ·
-  duplicate cel/layer · delete · insert blank frames · copy/paste cels
-- [ ] **Prompt lane on the timeline (Chain Studio parity)**: Global Prompt
-  box = base prompt; per-segment prompt clips on a dedicated lane that
-  overlap the gen window get appended in timeline order. Supports
-  `<Picture i>` / `<Video k>` tags against the ref slots.
+- [x] Chain Studio-style surgical regeneration:
+  - Drag across cels on a layer row = frame-range selection (orange highlight;
+    plain click still just moves the cursor)
+  - "Regen frames a–b" / "Regen this frame" in the timeline context menu
+  - Partial frame ranges honored end-to-end: seconds snaps up to H3's 17k+5
+    grid to cover the range (round-trip verified), a fresh seed busts the
+    cache, gen targets the layer, and ingest SPLICES the new frames over
+    [start, start+count) only — cels outside the range stay untouched
+- [x] **Timeline right-click context menu (smooth, Chain Studio-style)**:
+  regen this frame/range · copy/paste cel · duplicate cel · insert blank ·
+  clear · delete (shift) · duplicate/delete layer. (Chain items — continue
+  from here / use as context — land with Phase 11, when chains exist.)
+- [x] **Prompt lane on the timeline (Chain Studio parity)**: dedicated PROMPT
+  lane above the layer rows (One Forge only); right-click lane/header to add
+  a segment clip, dbl-click to edit (floating editor — window.prompt is dead
+  in Electron), drag body to move, drag edges to resize. Segments overlapping
+  the gen window append to the base prompt in timeline order via hidden
+  `prompt_segments` + `gen_win_start` widgets (synced at queue time);
+  `<Picture i>` / `<Video k>` tags in segment text pass through and suppress
+  auto-bind dupes. Persisted in node.properties.
 - [x] Layer blending modes (multiply, screen, overlay) — applied in compositeFrame
 - [ ] Frame timing overrides (per-frame duration for non-uniform animation)
 - [ ] Layer group/folder support (group background layers, etc.)

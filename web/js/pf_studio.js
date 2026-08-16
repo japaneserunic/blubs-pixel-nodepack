@@ -440,6 +440,13 @@ function createForge(node, config) {
         genFrameStart: 0,
         genFrameEnd: -1,      // -1 = all frames
 
+        // Phase 9: frame-range selection + surgical regen + prompt lane
+        frameSel: null,       // {layer, start, end} inclusive cel range or null
+        regenWindow: null,    // {start, count} pending surgical-regen splice
+        celClipboard: null,   // copied cel (canvas) for copy/paste
+        promptSegs: [],       // [{start, end, prompt}] timeline prompt lane
+        activePromptSeg: -1,  // selected prompt segment index or -1
+
         // Pipeline debug stages (toggled, not shown by default)
         debugStages: {},      // {stageName: [{filename,...}]}
         showDebugStages: false,
@@ -702,6 +709,7 @@ function createForge(node, config) {
         node.properties.pfs_drawnRef = st.drawnRef;
         node.properties.pfs_refSlots = { ...st.refSlots };
         node.properties.pfs_vidRef = st.vidRef || "";
+        node.properties.pfs_promptSegs = st.promptSegs.map(s => ({ start: s.start, end: s.end, prompt: s.prompt }));
     }
 
     function restoreLayerProps() {
@@ -1580,13 +1588,27 @@ function createForge(node, config) {
             if (tgt === "current") target = st.layers[st.activeLayer] || null;
             else if (tgt !== "new") target = st.layers.find(l => l.id === tgt) || null;
 
+            let regenStart = -1;
             if (target && incoming.length) {
-                // Fill the target layer in place — identity, transform,
-                // keyframes and ref/normal kind all survive the regen.
-                target.frames = incoming[0].frames;
+                if (st.regenWindow) {
+                    // Surgical regen: splice the regenerated frames over the
+                    // selected range ONLY — cels outside it stay untouched.
+                    const rw = st.regenWindow;
+                    const gen = incoming[0].frames;
+                    for (let i = 0; i < rw.count && i < gen.length; i++) {
+                        target.frames[rw.start + i] = gen[i];
+                    }
+                    regenStart = rw.start;
+                    incoming.shift();
+                } else {
+                    // Fill the target layer in place — identity, transform,
+                    // keyframes and ref/normal kind all survive the regen.
+                    target.frames = incoming[0].frames;
+                    incoming.shift();
+                }
                 target._dirty = true;
-                incoming.shift();
             }
+            st.regenWindow = null;
             const targetId = target ? target.id : null;
             st.layers = st.layers.filter(l =>
                 (l.source && l.source !== "forge") || l.id === targetId);
@@ -1609,7 +1631,8 @@ function createForge(node, config) {
 
             _recalcTotalFrames();
             _invalidateAllComposites();
-            st.frame = 0; st._acc = 0; st.tlScroll = 0; st._palKey = "";
+            st.frame = regenStart >= 0 ? regenStart : 0;
+            st._acc = 0; st.tlScroll = 0; st._palKey = ""; st.frameSel = null;
             reportEl.textContent = st.report;
             saveLayerProps();
             refreshLayerBar();
@@ -1988,6 +2011,8 @@ function createForge(node, config) {
         const rows = st.layers.length
             ? st.layers.map((l, i) => ({ type: "layer", idx: i, layer: l }))
             : stageList().map(s => ({ type: "stage", name: s }));
+        // Phase 9: prompt lane rides above all rows (One Forge only)
+        if (config.tabs) rows.unshift({ type: "prompt" });
         const rowH = Math.max(20, Math.min(32, (H - TL_HEADER) / Math.max(1, rows.length)));
         let maxN = 1;
         if (st.layers.length) {
@@ -1995,6 +2020,7 @@ function createForge(node, config) {
         } else {
             for (const r of rows) maxN = Math.max(maxN, (st.imgs[r.name] || []).length);
         }
+        for (const s of st.promptSegs) maxN = Math.max(maxN, (s.end || 0));
         const avail = W - TL_GUTTER - 6;
         let cellW = Math.min(40, Math.max(10, avail / maxN));
         const totalW = cellW * maxN;
@@ -2043,6 +2069,41 @@ function createForge(node, config) {
         // ---- rows ----
         rows.forEach((row, r) => {
             const y = TL_HEADER + r * rowH;
+
+            if (row.type === "prompt") {
+                // ==== PROMPT LANE (Phase 9): per-segment prompt clips ====
+                tctx.fillStyle = "#0e1218";
+                tctx.fillRect(0, y, W, rowH);
+                tctx.strokeStyle = "#1e1e28"; tctx.lineWidth = 1;
+                tctx.beginPath(); tctx.moveTo(0, y + .5); tctx.lineTo(W, y + .5); tctx.stroke();
+
+                tctx.fillStyle = "#101018";
+                tctx.fillRect(0, y, TL_GUTTER, rowH);
+                tctx.fillStyle = "#6fb7ff"; tctx.font = "8.5px sans-serif";
+                tctx.textAlign = "left";
+                tctx.fillText("PROMPT ✎", 8, y + rowH / 2 + .5);
+
+                for (let si = 0; si < st.promptSegs.length; si++) {
+                    const seg = st.promptSegs[si];
+                    const x0 = TL_GUTTER + seg.start * cellW - off;
+                    const x1 = TL_GUTTER + seg.end * cellW - off;
+                    if (x1 < TL_GUTTER || x0 > W) continue;
+                    const cx0 = Math.max(x0, TL_GUTTER);
+                    const sel = si === st.activePromptSeg;
+                    tctx.fillStyle = sel ? "#1d3550" : "#14202e";
+                    tctx.fillRect(cx0 + 1, y + 3, Math.max(6, x1 - cx0) - 2, rowH - 6);
+                    tctx.strokeStyle = sel ? "#6fb7ff" : "#2c4a6a";
+                    tctx.strokeRect(cx0 + 1.5, y + 3.5, Math.max(6, x1 - cx0) - 3, rowH - 7);
+                    tctx.fillStyle = "#9fc4e8"; tctx.font = "8px sans-serif";
+                    tctx.save();
+                    tctx.beginPath();
+                    tctx.rect(cx0 + 3, y, Math.max(0, x1 - cx0) - 6, rowH);
+                    tctx.clip();
+                    tctx.fillText(seg.prompt || "(empty — right-click to edit)", cx0 + 5, y + rowH / 2 + .5);
+                    tctx.restore();
+                }
+                return;
+            }
 
             if (row.type === "layer") {
                 // ==== REAL LAYER ROW ====
@@ -2115,6 +2176,14 @@ function createForge(node, config) {
                     }
                     tctx.strokeStyle = "#26262f";
                     tctx.strokeRect(cx + .5, cy + .5, cw - 1, chh - 1);
+                    // Phase 9: dragged frame-range selection highlight
+                    if (st.frameSel && st.frameSel.layer === row.idx
+                            && i >= st.frameSel.start && i <= st.frameSel.end) {
+                        tctx.fillStyle = "rgba(255,157,69,0.16)";
+                        tctx.fillRect(cx, cy, cw, chh);
+                        tctx.strokeStyle = "rgba(255,157,69,0.65)";
+                        tctx.strokeRect(cx + .5, cy + .5, cw - 1, chh - 1);
+                    }
                     if (isCur && i === st.frame) {
                         tctx.strokeStyle = "#ff9d45"; tctx.lineWidth = 2;
                         tctx.strokeRect(cx - .5, cy - .5, cw + 2, chh + 2);
@@ -2205,6 +2274,7 @@ function createForge(node, config) {
             const rIdx = Math.floor((y - TL_HEADER) / rowH);
             const row = rows[Math.min(rIdx, rows.length - 1)];
             if (!row) return;
+            if (row.type === "prompt") return;  // prompt lane has its own handlers
 
             if (row.type === "layer") {
                 // ==== REAL LAYER ROW ====
@@ -2392,6 +2462,274 @@ function createForge(node, config) {
         saveLayerProps(); refreshRefSlots();
     }
 
+    // ==================== Phase 9: cel ops + surgical regen + prompt lane ====
+    function afterCelOps() {
+        st.frameSel = null;  // selection indices are stale after cel surgery
+        _recalcTotalFrames(); _invalidateAllComposites();
+        saveLayerProps(); draw(); drawTl();
+    }
+    function _celSurf(layer, f) {
+        const s = frameSurf(layer && layer.frames[f]);
+        return (s && surfW(s)) ? s : null;
+    }
+    function _celCopyCanvas(surf) {
+        const cv = document.createElement("canvas");
+        cv.width = surfW(surf); cv.height = surfH(surf);
+        const cx = cv.getContext("2d"); cx.imageSmoothingEnabled = false;
+        cx.drawImage(surf, 0, 0);
+        return cv;
+    }
+    function celCopy(layerIdx, f) {
+        const s = _celSurf(st.layers[layerIdx], f);
+        st.celClipboard = s ? _celCopyCanvas(s) : null;
+        if (s) console.info(`[PixelForge] cel ${f + 1} copied`);
+    }
+    function celPaste(layerIdx, f) {
+        const layer = st.layers[layerIdx];
+        if (!layer || !st.celClipboard) return;
+        if (layer.locked) { console.info("[PixelForge] layer is locked"); return; }
+        layer.frames[f] = { img: null, canvas: _celCopyCanvas(st.celClipboard), source: "paint" };
+        afterCelOps();
+    }
+    function celDuplicate(layerIdx, f) {
+        const layer = st.layers[layerIdx];
+        if (!layer) return;
+        if (layer.locked) { console.info("[PixelForge] layer is locked"); return; }
+        const s = _celSurf(layer, f);
+        layer.frames.splice(f + 1, 0,
+            s ? { img: null, canvas: _celCopyCanvas(s), source: "paint" } : null);
+        afterCelOps();
+    }
+    function celInsertBlank(layerIdx, f) {
+        const layer = st.layers[layerIdx];
+        if (!layer) return;
+        if (layer.locked) { console.info("[PixelForge] layer is locked"); return; }
+        layer.frames.splice(f, 0, null);
+        afterCelOps();
+    }
+    function celClear(layerIdx, f) {
+        const layer = st.layers[layerIdx];
+        if (!layer) return;
+        if (layer.locked) { console.info("[PixelForge] layer is locked"); return; }
+        layer.frames[f] = null;
+        afterCelOps();
+    }
+    function celDelete(layerIdx, f) {
+        const layer = st.layers[layerIdx];
+        if (!layer) return;
+        if (layer.locked) { console.info("[PixelForge] layer is locked"); return; }
+        layer.frames.splice(f, 1);
+        afterCelOps();
+    }
+
+    // ---- surgical regen: regenerate ONLY the selected frame range ----
+    // Frontend-orchestrated: seconds snaps up to cover the range (H3's
+    // 17k+5 grid), a fresh seed busts the cache, the gen targets the layer,
+    // and loadStages splices the new frames over [start, start+count).
+    function regenRange(layerIdx, start, end) {
+        const layer = st.layers[layerIdx];
+        if (!layer) return;
+        const wSec = widgetByName("seconds");
+        if (!wSec) { console.info("[PixelForge] regen: no seconds widget (Super Forge?)"); return; }
+        const count = end - start + 1;
+        let n = Math.max(5, count);
+        while (n % 17 !== 5) n++;
+        setWidgetValue(wSec, n / 24);
+        const wSeed = widgetByName("seed");
+        if (wSeed) setWidgetValue(wSeed, Math.floor(Math.random() * 0xffffffff));
+        st.genTarget = layer.id;
+        st.regenWindow = { start, count };
+        saveLayerProps(); refreshLayerBar();
+        console.info(`[PixelForge] surgical regen: "${layer.name}" frames ${start + 1}–${end + 1} `
+            + `(gen ${n}f @24fps, splice first ${count})`);
+        app.queuePrompt();
+    }
+
+    // ---- prompt lane ops ----
+    function promptSegAdd(frame) {
+        st.promptSegs.push({ start: Math.max(0, frame), end: Math.max(0, frame) + 22, prompt: "" });
+        st.promptSegs.sort((a, b) => a.start - b.start);
+        st.activePromptSeg = st.promptSegs.findIndex(s => s.end === Math.max(0, frame) + 22 && s.start === Math.max(0, frame));
+        saveLayerProps(); drawTl();
+        promptSegEdit(st.activePromptSeg);
+    }
+    function promptSegEdit(i) {
+        const seg = st.promptSegs[i];
+        if (seg == null) return;
+        openPromptEditor(i);
+    }
+    function promptSegDelete(i) {
+        if (i < 0 || i >= st.promptSegs.length) return;
+        st.promptSegs.splice(i, 1);
+        st.activePromptSeg = -1;
+        saveLayerProps(); drawTl();
+    }
+
+    // ---- small floating popup (context menu + prompt editor share CSS) ----
+    let _pfsPopup = null;
+    function closePopup() {
+        if (_pfsPopup) { _pfsPopup.remove(); _pfsPopup = null; }
+        window.removeEventListener("pointerdown", _popupOutside, true);
+        window.removeEventListener("keydown", _popupKey, true);
+    }
+    function _popupOutside(e) {
+        if (_pfsPopup && !_pfsPopup.contains(e.target)) closePopup();
+    }
+    function _popupKey(e) {
+        if (e.key === "Escape") { e.stopPropagation(); closePopup(); }
+    }
+    function _openPopup(el, x, y) {
+        closePopup();
+        el.style.position = "fixed";
+        el.style.zIndex = 100000;
+        el.style.background = "#16161f";
+        el.style.border = "1px solid #2a2a38";
+        el.style.borderRadius = "6px";
+        el.style.boxShadow = "0 6px 24px rgba(0,0,0,0.6)";
+        el.style.font = "11px sans-serif";
+        el.style.color = "#c8c8d4";
+        // keep canvas/app shortcuts from seeing editor keystrokes
+        el.addEventListener("keydown", (ev) => {
+            if (ev.key !== "Escape") ev.stopPropagation();
+        });
+        document.body.appendChild(el);
+        const r = el.getBoundingClientRect();
+        el.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 8)) + "px";
+        el.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 8)) + "px";
+        _pfsPopup = el;
+        window.addEventListener("pointerdown", _popupOutside, true);
+        window.addEventListener("keydown", _popupKey, true);
+    }
+    function _ctxItem(menu, label, tip, fn, disabled) {
+        const it = document.createElement("div");
+        it.textContent = label;
+        it.title = tip || "";
+        it.style.padding = "5px 14px";
+        it.style.cursor = disabled ? "default" : "pointer";
+        it.style.whiteSpace = "nowrap";
+        it.style.opacity = disabled ? "0.38" : "1";
+        if (!disabled) {
+            it.addEventListener("mouseenter", () => { it.style.background = "#23233a"; });
+            it.addEventListener("mouseleave", () => { it.style.background = ""; });
+            it.addEventListener("click", (e) => { e.stopPropagation(); closePopup(); fn(); });
+        }
+        menu.appendChild(it);
+        return it;
+    }
+    function _ctxSep(menu) {
+        const s = document.createElement("div");
+        s.style.borderTop = "1px solid #2a2a38";
+        s.style.margin = "3px 0";
+        menu.appendChild(s);
+    }
+
+    // ---- timeline right-click context menu (Chain Studio-style) ----
+    function openTlMenu(e, hit) {
+        const menu = document.createElement("div");
+        menu.style.padding = "4px 0";
+        if (hit.row && hit.row.type === "prompt" || hit.header) {
+            // prompt lane / header: segment ops
+            if (hit.segIdx >= 0) {
+                _ctxItem(menu, "✎ Edit prompt segment…", "", () => promptSegEdit(hit.segIdx));
+                _ctxItem(menu, "✕ Delete segment", "", () => promptSegDelete(hit.segIdx));
+            } else {
+                _ctxItem(menu, "＋ Add prompt segment here",
+                    "Per-segment prompt clip: appended to the base prompt when the gen "
+                    + "window overlaps it. Supports <Picture 1> / <Video 1> tags.",
+                    () => promptSegAdd(hit.frame));
+            }
+        } else if (hit.row && hit.row.type === "layer" && hit.frame >= 0) {
+            const li = hit.row.idx;
+            const layer = st.layers[li];
+            const sel = st.frameSel && st.frameSel.layer === li
+                && hit.frame >= st.frameSel.start && hit.frame <= st.frameSel.end
+                ? st.frameSel : null;
+            const a = sel ? sel.start : hit.frame;
+            const b = sel ? sel.end : hit.frame;
+            _ctxItem(menu,
+                sel ? `🔁 Regen frames ${a + 1}–${b + 1}` : "🔁 Regen this frame",
+                "Surgical regen: re-generate just this range (fresh seed) and splice "
+                + "it back over these cels — everything else stays untouched.",
+                () => regenRange(li, a, b));
+            _ctxSep(menu);
+            _ctxItem(menu, "Copy cel", "", () => celCopy(li, hit.frame),
+                !_celSurf(layer, hit.frame));
+            _ctxItem(menu, "Paste cel", "", () => celPaste(li, hit.frame),
+                !st.celClipboard);
+            _ctxItem(menu, "Duplicate cel", "Insert a copy of this cel right after it",
+                () => celDuplicate(li, hit.frame));
+            _ctxItem(menu, "Insert blank cel", "Shift later cels right by one",
+                () => celInsertBlank(li, hit.frame));
+            _ctxItem(menu, "Clear cel", "Empty this cel (no shift)",
+                () => celClear(li, hit.frame), !layer || !layer.frames[hit.frame]);
+            _ctxItem(menu, "Delete cel", "Remove this cel, shift later cels left",
+                () => celDelete(li, hit.frame));
+            _ctxSep(menu);
+            _ctxItem(menu, "Duplicate layer", "", () => { duplicateLayer(li); draw(); drawTl(); });
+            _ctxItem(menu, "Delete layer", "", () => { removeLayer(li); draw(); drawTl(); },
+                st.layers.length <= 1);
+        } else {
+            return; // nothing useful here
+        }
+        menu.addEventListener("pointerdown", (e2) => e2.stopPropagation());
+        _openPopup(menu, e.clientX, e.clientY);
+    }
+
+    // ---- prompt segment editor (window.prompt is dead in Electron) ----
+    function openPromptEditor(segIdx) {
+        const seg = st.promptSegs[segIdx];
+        if (!seg) return;
+        const box = document.createElement("div");
+        box.style.padding = "10px";
+        box.style.width = "320px";
+        const lbl = document.createElement("div");
+        lbl.textContent = `Prompt · frames ${seg.start + 1}–${seg.end}`;
+        lbl.style.marginBottom = "6px";
+        lbl.style.color = "#6fb7ff";
+        const ta = document.createElement("textarea");
+        ta.value = seg.prompt || "";
+        ta.rows = 4;
+        ta.placeholder = "e.g. the knight swings his sword — <Picture 1> keeps identity, <Video 1> drives motion";
+        ta.style.width = "100%";
+        ta.style.boxSizing = "border-box";
+        ta.style.background = "#0d0d13";
+        ta.style.color = "#c8c8d4";
+        ta.style.border = "1px solid #2a2a38";
+        ta.style.borderRadius = "4px";
+        ta.style.font = "11px sans-serif";
+        ta.style.resize = "vertical";
+        const row = document.createElement("div");
+        row.style.marginTop = "8px";
+        row.style.textAlign = "right";
+        const mkB = (t, fn) => {
+            const b = document.createElement("button");
+            b.textContent = t;
+            b.style.marginLeft = "6px";
+            b.style.background = "#23233a";
+            b.style.color = "#c8c8d4";
+            b.style.border = "1px solid #2a2a38";
+            b.style.borderRadius = "4px";
+            b.style.padding = "3px 12px";
+            b.style.cursor = "pointer";
+            b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+            return b;
+        };
+        row.appendChild(mkB("Delete", () => { closePopup(); promptSegDelete(segIdx); }));
+        row.appendChild(mkB("Cancel", () => closePopup()));
+        row.appendChild(mkB("Save", () => {
+            seg.prompt = ta.value;
+            saveLayerProps(); drawTl(); closePopup();
+        }));
+        box.append(lbl, ta, row);
+        box.addEventListener("pointerdown", (e2) => e2.stopPropagation());
+        // anchor near the segment on the timeline
+        const r = tl.getBoundingClientRect();
+        const { cellW } = tlLayout();
+        const x = r.left + TL_GUTTER + seg.start * cellW - st.tlScroll;
+        _openPopup(box, Math.min(x, window.innerWidth - 340), r.top - 10);
+        ta.focus();
+    }
+
     // ---- suite → widget sync (runs before every queued prompt) ----
     // The placement dot and marquee are suite-side state; the backend reads
     // them through the placement_x/y and selection_* widgets. Syncing at
@@ -2421,6 +2759,11 @@ function createForge(node, config) {
         const wsy = widgetByName("selection_y"); if (wsy) setWidgetValue(wsy, sy);
         const wsw = widgetByName("selection_w"); if (wsw) setWidgetValue(wsw, sw);
         const wsh = widgetByName("selection_h"); if (wsh) setWidgetValue(wsh, sh);
+        // Phase 9: prompt lane + gen window (regen offset) ride hidden widgets
+        const wps = widgetByName("prompt_segments");
+        if (wps) setWidgetValue(wps, JSON.stringify(st.promptSegs || []));
+        const wgs = widgetByName("gen_win_start");
+        if (wgs) setWidgetValue(wgs, st.regenWindow ? st.regenWindow.start : 0);
     }
     if (!window._pfDrawnRefUploads) window._pfDrawnRefUploads = new Set();
     window._pfDrawnRefUploads.add(uploadDrawnRef);
@@ -2556,15 +2899,130 @@ function createForge(node, config) {
         zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2);
     }, { passive: false });
 
-    // timeline interaction: click cels / scrub / wheel-scroll frames
-    let tlDown = false;
+    // timeline interaction: click cels / drag-select ranges / scrub /
+    // prompt-lane drag+resize / right-click context menu / wheel-scroll
+    function tlHit(e) {
+        const r = tl.getBoundingClientRect();
+        const x = e.clientX - r.left, y = e.clientY - r.top;
+        const { rows, rowH, cellW } = tlLayout();
+        const header = y < TL_HEADER;
+        const rIdx = header ? -1 : Math.floor((y - TL_HEADER) / rowH);
+        const row = rIdx >= 0 ? rows[Math.min(rIdx, rows.length - 1)] : null;
+        const gutter = x < TL_GUTTER;
+        const frame = !gutter
+            ? Math.floor((x - TL_GUTTER + st.tlScroll) / cellW) : -1;
+        let segIdx = -1, segEdge = "";
+        if (row && row.type === "prompt" && frame >= 0) {
+            for (let i = 0; i < st.promptSegs.length; i++) {
+                const s = st.promptSegs[i];
+                if (frame >= s.start && frame < s.end) {
+                    segIdx = i;
+                    const x0 = TL_GUTTER + s.start * cellW - st.tlScroll;
+                    const x1 = TL_GUTTER + s.end * cellW - st.tlScroll;
+                    if (Math.abs(x - x0) <= 4) segEdge = "l";
+                    else if (Math.abs(x - x1) <= 4) segEdge = "r";
+                    break;
+                }
+            }
+        }
+        return { x, y, header, row, frame, segIdx, segEdge, gutter };
+    }
+
+    let tlDown = false, tlDrag = null;
     tl.addEventListener("pointerdown", (e) => {
-        e.stopPropagation(); tlDown = true;
+        e.stopPropagation();
+        if (e.button === 2) return;  // contextmenu handles it
+        tlDown = true;
         tl.setPointerCapture(e.pointerId);
-        tlPick(e);
+        const hit = tlHit(e);
+        tlDrag = null;
+        if (hit.row && hit.row.type === "prompt") {
+            // prompt lane: select / move / edge-resize segments
+            st.activePromptSeg = hit.segIdx;
+            if (hit.segIdx >= 0) {
+                const seg = st.promptSegs[hit.segIdx];
+                tlDrag = { mode: hit.segEdge === "l" ? "seg-resize-l"
+                    : hit.segEdge === "r" ? "seg-resize-r" : "seg-move",
+                    seg, anchor: hit.frame, oStart: seg.start, oEnd: seg.end };
+            }
+            drawTl();
+            return;
+        }
+        if (hit.row && hit.row.type === "layer" && hit.frame >= 0 && !hit.gutter) {
+            // cel: click = cursor, drag = frame-range selection
+            st.activeLayer = hit.row.idx;
+            st.frame = Math.max(0, Math.min(frameCount() - 1, hit.frame));
+            st.activeFrame = st.frame;
+            st.frameSel = null;
+            tlDrag = { mode: "sel", layer: hit.row.idx, anchor: hit.frame };
+            draw(); drawTl(); saveLayerProps();
+            return;
+        }
+        tlPick(e);  // header scrub + gutter eye/lock/name
+        tlDrag = hit.header ? null : { mode: "noop" };
     });
-    tl.addEventListener("pointermove", (e) => { if (tlDown) tlPick(e); });
-    tl.addEventListener("pointerup", () => { tlDown = false; });
+    tl.addEventListener("pointermove", (e) => {
+        if (!tlDown) return;
+        const hit = tlHit(e);
+        if (tlDrag && tlDrag.mode === "sel" && hit.frame >= 0) {
+            st.frame = Math.max(0, Math.min(frameCount() - 1, hit.frame));
+            st.frameSel = { layer: tlDrag.layer,
+                start: Math.min(tlDrag.anchor, hit.frame),
+                end: Math.max(tlDrag.anchor, hit.frame) };
+            draw(); drawTl();
+            return;
+        }
+        if (tlDrag && tlDrag.mode === "seg-move" && hit.frame >= 0) {
+            const df = hit.frame - tlDrag.anchor;
+            const len = tlDrag.oEnd - tlDrag.oStart;
+            tlDrag.seg.start = Math.max(0, tlDrag.oStart + df);
+            tlDrag.seg.end = tlDrag.seg.start + len;
+            drawTl();
+            return;
+        }
+        if (tlDrag && tlDrag.mode === "seg-resize-l" && hit.frame >= 0) {
+            tlDrag.seg.start = Math.max(0,
+                Math.min(tlDrag.oStart + (hit.frame - tlDrag.anchor), tlDrag.seg.end - 1));
+            drawTl();
+            return;
+        }
+        if (tlDrag && tlDrag.mode === "seg-resize-r" && hit.frame >= 0) {
+            tlDrag.seg.end = Math.max(tlDrag.seg.start + 1,
+                tlDrag.oEnd + (hit.frame - tlDrag.anchor));
+            drawTl();
+            return;
+        }
+        if (!tlDrag) tlPick(e);  // header scrub drag keeps old behavior
+    });
+    const tlUp = () => {
+        if (tlDrag && tlDrag.mode && tlDrag.mode.indexOf("seg-") === 0) {
+            st.promptSegs.sort((a, b) => a.start - b.start);
+            st.activePromptSeg = st.promptSegs.indexOf(tlDrag.seg);
+            saveLayerProps();
+        }
+        if (tlDrag && tlDrag.mode === "sel" && st.frameSel
+                && st.frameSel.start === st.frameSel.end) {
+            st.frameSel = null;  // plain click, not a range
+        }
+        tlDrag = null; tlDown = false;
+        drawTl();
+    };
+    tl.addEventListener("pointerup", tlUp);
+    tl.addEventListener("pointercancel", tlUp);
+    tl.addEventListener("contextmenu", (e) => {
+        e.stopPropagation(); e.preventDefault();
+        const hit = tlHit(e);
+        if (hit.gutter && !(hit.row && hit.row.type === "layer")) return;
+        if (hit.header && hit.frame < 0) return;
+        openTlMenu(e, hit);
+    });
+    tl.addEventListener("dblclick", (e) => {
+        const hit = tlHit(e);
+        if (hit.row && hit.row.type === "prompt" && hit.segIdx >= 0) {
+            e.stopPropagation();
+            promptSegEdit(hit.segIdx);
+        }
+    });
     tl.addEventListener("wheel", (e) => {
         e.stopPropagation(); e.preventDefault();
         const { maxN, cellW, avail } = tlLayout();
