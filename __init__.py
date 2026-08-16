@@ -18,6 +18,11 @@ from .pf_easy import NODE_CLASS_MAPPINGS as _E_C, NODE_DISPLAY_NAME_MAPPINGS as 
 from .pf_studio import NODE_CLASS_MAPPINGS as _FS_C, NODE_DISPLAY_NAME_MAPPINGS as _FS_D
 from .pf_oneforge import NODE_CLASS_MAPPINGS as _OF_C, NODE_DISPLAY_NAME_MAPPINGS as _OF_D
 
+try:  # probe endpoint (v3.5.3-probe) — must never break pack registration
+    from . import pf_debuglog  # noqa: F401
+except Exception:
+    pass
+
 WEB_DIRECTORY = "./web"
 
 NODE_CLASS_MAPPINGS = {

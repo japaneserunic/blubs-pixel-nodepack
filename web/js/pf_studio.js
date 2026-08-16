@@ -1,4 +1,4 @@
-/* VERSION: v3.5.2-authoritative (2026-08-16) — UX cleanup: plumbing filter, run button, multiline prompts, version chip
+/* VERSION: v3.5.3-probe (2026-08-16) — self-report pointer forensics (POST /pixelforge/probe); owner tests with ZERO commands
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -73,8 +73,67 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.5.2-authoritative — mask reaper + self-managed frame geometry");
-const PFS_VERSION = "v3.5.2-authoritative";
+console.info("[PixelForge] pf_studio v3.5.3-probe — mask reaper + self-managed frame geometry + pointer forensics");
+const PFS_VERSION = "v3.5.3-probe";
+// --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
+// to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
+// owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
+// forget; can never throw into the page.
+const __pfsProbeQ = [];
+let __pfsProbeTimer = null;
+function __pfsProbe(kind, data) {
+    try {
+        __pfsProbeQ.push(Object.assign({ kind, t: Date.now(), v: PFS_VERSION }, data));
+        if (!__pfsProbeTimer) {
+            __pfsProbeTimer = setTimeout(() => {
+                __pfsProbeTimer = null;
+                const batch = __pfsProbeQ.splice(0, __pfsProbeQ.length);
+                fetch("/pixelforge/probe", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ events: batch }),
+                }).catch(() => {});
+            }, 1500);
+        }
+    } catch (_) {}
+}
+const __pfsElTag = (e) => {
+    if (!e) return "null";
+    let pe = "?";
+    try { pe = getComputedStyle(e).pointerEvents; } catch (_) {}
+    return e.tagName + "." + String(e.className || "").slice(0, 60) + " pe=" + pe;
+};
+if (!window.__pfsClickProbe) {
+    window.__pfsClickProbe = true;
+    window.addEventListener("pointerdown", (ev) => {
+        try {
+            const x = ev.clientX, y = ev.clientY;
+            const hit = document.elementFromPoint(x, y);
+            // suite sliders under the pointer that did NOT receive the event
+            const covered = [];
+            for (const r of document.querySelectorAll(".pfs-root input[type=range]")) {
+                const b = r.getBoundingClientRect();
+                if (b.width > 0 && x >= b.left && x <= b.right && y >= b.top && y <= b.bottom && hit !== r) {
+                    covered.push({ val: r.value, min: r.min, max: r.max });
+                }
+            }
+            const masks = document.querySelectorAll(".p-blockui-mask").length;
+            const locked = document.body.classList.contains("p-overflow-hidden");
+            // log only anomaly-relevant clicks: slider-covered, or mask/lock present
+            if (covered.length || masks || locked) {
+                __pfsProbe("pdown", {
+                    x: Math.round(x), y: Math.round(y),
+                    inSuite: !!(hit && hit.closest && hit.closest(".pfs-root")),
+                    hit: __pfsElTag(hit),
+                    covered: covered.length ? covered : undefined,
+                    masks, locked,
+                    stack: document.elementsFromPoint(x, y).slice(0, 4).map(__pfsElTag),
+                });
+            }
+        } catch (_) {}
+    }, true);
+    __pfsProbe("probe-armed", { href: location.href });
+}
 if (!window.__pfsMaskReaper) {
     const born = new WeakMap();
     window.__pfsMaskReaper = setInterval(() => {
@@ -1512,6 +1571,21 @@ function createForge(node, config) {
                 slider.addEventListener("pointerup", slideEnd);
                 slider.addEventListener("pointercancel", slideEnd);
                 window.addEventListener("pointerup", slideEnd);
+                // v3.5.3-probe: one gesture summary per drag + ungestured (keyboard)
+                // inputs, so a dead drag and a healthy drag are both visible in the log
+                let __g = null;
+                slider.addEventListener("pointerdown", () => { __g = { from: slider.value, inputs: 0, t0: Date.now() }; }, true);
+                slider.addEventListener("input", () => {
+                    if (__g) __g.inputs++;
+                    else __pfsProbe("nongesture-input", { widget: w.name, value: slider.value });
+                });
+                const __gEnd = () => {
+                    if (!__g) return;
+                    __pfsProbe("gesture", { widget: w.name, from: __g.from, to: slider.value, inputs: __g.inputs, ms: Date.now() - __g.t0 });
+                    __g = null;
+                };
+                slider.addEventListener("pointerup", __gEnd);
+                slider.addEventListener("pointercancel", __gEnd);
                 row.appendChild(slider);
             }
             num.addEventListener("change", () => commit(num.value));
