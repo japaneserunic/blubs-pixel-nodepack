@@ -1,4 +1,4 @@
-/* VERSION: v3.4.3-maskleak (2026-08-16) — force cache bust
+/* VERSION: v3.4.4-maskleak2 (2026-08-16) — force cache bust
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -43,7 +43,7 @@
  * every tick (the old frontend's own geometry sync read stale layout state
  * after a resize, then stopped when the canvas was no longer dirty).
  *
- * MASK REAPER (v3.4.3): a global watchdog reaps orphaned PrimeVue
+ * MASK REAPER (v3.4.3, hardened v3.4.4 with a stuck-spinner sweep): a global watchdog reaps orphaned PrimeVue
  * full-screen BlockUI masks (stuck spinner overlay from the App root) - the
  * stuck mask freezes the whole page (sliders/canvas/menus all dead) after a
  * workflow load. See the __pfsMaskReaper guard below.
@@ -73,13 +73,25 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
+console.info("[PixelForge] pf_studio v3.4.4-maskleak2 — BlockUI mask reaper active");
 if (!window.__pfsMaskReaper) {
+    const born = new WeakMap();
     window.__pfsMaskReaper = setInterval(() => {
         const now = Date.now();
         let reaped = false;
-        for (const m of document.querySelectorAll(".p-blockui-mask.p-overlay-mask-leave")) {
-            const seen = m.__pfsLeaveSeen || (m.__pfsLeaveSeen = now);
-            if (now - seen > 1000) { m.remove(); reaped = true; }
+        for (const m of document.querySelectorAll(".p-blockui-mask")) {
+            if (!born.has(m)) born.set(m, now);
+            const age = now - born.get(m);
+            const leaving = m.classList.contains("p-overlay-mask-leave");
+            // -leave = the app already asked for it to go: 1s grace. Otherwise a
+            // full-screen mask older than 12s means the spinner never released
+            // (stuck-blocked variant) — reap that too; a legit workflow-load
+            // spinner lives for ~1-2s, so the window never touches live UI.
+            if ((leaving && age > 1000) || age > 12000) {
+                console.info("[PixelForge] reaped stuck full-screen BlockUI mask (" + (leaving ? "leave-orphan" : "stuck-spinner") + ", age " + Math.round(age / 1000) + "s)");
+                m.remove();
+                reaped = true;
+            }
         }
         if (reaped && !document.querySelector(".p-overlay-mask")) {
             document.body.classList.remove("p-overflow-hidden");
