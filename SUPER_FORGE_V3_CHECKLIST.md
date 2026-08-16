@@ -361,24 +361,34 @@ animations are chained clips instead of one drifting mega-gen:
 
 ---
 
-## Phase 12: UX Cleanup (v3.5.0) — 2026-08-16
+## Phase 12: UX Cleanup (v3.5.0) — 2026-08-16 — ✅ DONE (v3.5.0-ux1 → v3.5.5)
 
 Owner feedback after Phase 8-9 landed: several spots confusing / not
-straight-forward; some sliders appeared stuck (rooted separately — PrimeVue
-BlockUI mask, v3.4.3/v3.4.4).
+straight-forward; some sliders appeared stuck (TWO separate root causes:
+PrimeVue BlockUI mask v3.4.3/v3.4.4, then the step×10 freeze v3.5.5).
 
-- [ ] **Plumbing leak**: 'More Parameters' section exposed 13 suite-internal
+- [x] **Plumbing leak**: 'More Parameters' section exposed 13 suite-internal
   sync widgets (target_layer, layer_name, placement_x/y, selection_x/y/w/h,
   drawn_ref_image, drawn_ref_image_2, ref_video_1, prompt_segments,
   gen_win_start) as editable rows — raw JSON/filenames, editing breaks sync.
   Filter them out of the panel (they stay on node.widgets for the prompt).
-- [ ] **No Run button**: the suite had no way to queue — you had to find
+- [x] **No Run button**: the suite had no way to queue — you had to find
   ComfyUI's own Run. Prominent ⚡ Forge button in the top bar (calls the
   wrapped queuePrompt, so layer/ref/marquee/prompt-lane sync still runs first).
-- [ ] **Prompt fields single-line**: character/action/style render as proper
+- [x] **Prompt fields single-line**: character/action/style render as proper
   multiline textareas.
-- [ ] **Version chip**: suite header shows the running version (v3.5.0) so
+- [x] **Version chip**: suite header shows the running version (v3.5.0) so
   stale-cache questions are answerable by looking at the node, no F12.
-- [ ] **Tooltip gaps**: combo selects inherit widget tooltips; Gen→ dropdown
+- [x] **Tooltip gaps**: combo selects inherit widget tooltips; Gen→ dropdown
   gets one.
-- [ ] Verify live over CDP: clean load, no console errors, all controls render.
+- [x] Verify live over CDP: clean load, no console errors, all controls render.
+- [x] **Frame detach (v3.5.2-authoritative)**: suite popped out of its node
+  frame — we own wrapper geometry now (litegraph-convention math), Vue
+  DomWidgets overlay demoted to spectator.
+- [x] **Stuck sliders ROOT CAUSE (v3.5.5-stepfix)**: the frontend stores
+  widget options.step as def step ×10 (raw in options.step2). Reading it raw
+  made every slider 10× coarser; narrow ranges froze solid (adv_tp_bands
+  [-1,4] at step 10 → −1 the only legal value). Fixed via step2 ?? step/10;
+  proven live by probe telemetry (native input events firing on adv_*).
+- [x] **Self-report probe (v3.5.3+)**: POST /pixelforge/probe → _probe_log.jsonl;
+  suite phones pointer forensics home so owner-side diagnosis needs no F12.
