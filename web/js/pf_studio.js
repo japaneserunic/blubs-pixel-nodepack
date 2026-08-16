@@ -1,4 +1,4 @@
-/* VERSION: v3.4.1-presetui (2026-08-16) — force cache bust
+/* VERSION: v3.4.2-sockstrip (2026-08-16) — force cache bust
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -48,7 +48,9 @@
  * (node.widgets_start_y = SUITE_TOP), so the suite occupies the ENTIRE node
  * body. The pins live on as the socket-strip chips inside the suite — they
  * show live link state and are fully wireable (left-drag to connect through
- * the canvas's own LinkConnector, right-click to disconnect). Slots are still
+ * the canvas's own LinkConnector, right-click to disconnect). The strip is
+ * HIDDEN BY DEFAULT (v3.4.2 — declutter); the ⇄ toolbar toggle brings it
+ * back whenever wiring is needed. Slots are still
  * measured, so existing links keep their anchor positions; they are simply
  * not drawn and reserve no body space.
  */
@@ -184,6 +186,7 @@ const STYLES = `
     background:#101018; border-bottom:1px solid #20202a; flex:0 0 auto;
     overflow-x:auto; overflow-y:hidden; scrollbar-width:none; white-space:nowrap; }
 .pfs-sockbar::-webkit-scrollbar { display:none; }
+.pfs-sockbar.hide { display:none; }
 .pfs-mode { font-size:8.5px; font-weight:700; letter-spacing:1.2px;
     color:#0e0e14; background:#ff9d45; border-radius:3px; padding:2px 6px;
     margin-right:4px; flex:0 0 auto; }
@@ -411,7 +414,7 @@ function createForge(node, config) {
         playing: false, loop: true, fps: 12,
         zoom: 0, panX: 0, panY: 0,          // zoom 0 = fit
         onion: false, grid: false, ab: false, abSplit: 0.5,
-        showPal: true, showTl: true,
+        showPal: true, showTl: true, showSockets: false,
         pal: [], _palKey: "",
         tlScroll: 0,
         _acc: 0, _lastT: 0, _raf: 0, _gifRaf: 0, _gifLast: 0,
@@ -1171,6 +1174,20 @@ function createForge(node, config) {
         outChips.push({ outp, chip });
     });
 
+    // ---- socket strip visibility (v3.4.2): hidden by default — owner found
+    // the chip row pure clutter. The pins still fully work when shown; the ⇄
+    // toolbar toggle brings the strip back for wiring. Persisted in pfs_ui. ----
+    const btnSocks = mkBtn("⇄", "Sockets — show/hide the node's input/output pins "
+        + "(wire by dragging a chip, right-click to disconnect)", () => {
+        st.showSockets = !st.showSockets;
+        btnSocks.classList.toggle("on", st.showSockets);
+        sockBar.classList.toggle("hide", !st.showSockets);
+        saveProps();
+    }, true);
+    btnSocks.classList.toggle("on", !!st.showSockets);
+    bar.appendChild(mkCluster(btnSocks));
+    sockBar.classList.toggle("hide", !st.showSockets);
+
     let flipToForgeTab = null;   // assigned when the One Forge tab strip is built
 
     // ---- chip wiring: the native socket rows are hidden (FULL-FRAME note),
@@ -1542,7 +1559,7 @@ function createForge(node, config) {
         node.properties.pfs_ui = {
             stage: st.stage, fps: st.fps, loop: st.loop,
             onion: st.onion, grid: st.grid, ab: st.ab,
-            showPal: st.showPal, showTl: st.showTl,
+            showPal: st.showPal, showTl: st.showTl, showSockets: !!st.showSockets,
         };
         saveLayerProps();
     }
@@ -1554,6 +1571,7 @@ function createForge(node, config) {
                 loop: p.loop !== false, onion: !!p.onion, grid: !!p.grid,
                 ab: !!p.ab,
                 showPal: p.showPal !== false, showTl: p.showTl !== false,
+                showSockets: !!p.showSockets,
             });
             fpsIn.value = st.fps;
             btnLoop.classList.toggle("on", st.loop);
@@ -1564,6 +1582,8 @@ function createForge(node, config) {
             btnTl.classList.toggle("on", st.showTl);
             left.classList.toggle("hide", !st.showPal);
             tlWrap.classList.toggle("hide", !st.showTl);
+            btnSocks.classList.toggle("on", st.showSockets);
+            sockBar.classList.toggle("hide", !st.showSockets);
         }
         restoreLayerProps();
     }
