@@ -190,18 +190,32 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 - [x] Generation targeting UI: dropdown in toolbar ("Gen→" New Layer / Current / layer names)
 - [x] Layer-aware preview: show composited result, not just one layer
 
-### Phase 8: Ref Input Support (mentioned by user) — NOT STARTED
+### Phase 8: Ref Input Support (Chain Studio-style ref genning) — NOT STARTED
 - [ ] Wire ref_image_2 input to layer system
 - [ ] Reference images can be placed as dedicated reference layers
 - [ ] Reference layers are locked + semi-transparent by default
 - [ ] Ref2va conditioning respects placement dot position
   (note: drawn-stroke → ref upload plumbing exists from the drawnref work)
+- [ ] **Character-slot refs (Chain Studio parity)**: panel-driven character
+  slots become `<Picture i>` tags in generation order — no wiring, refs are
+  picked in the suite UI like Chain Studio's Refs panel (REF2VA mode)
+- [ ] **Reference video clips → `<Video k>` tags**: attach a clip as a
+  reference track for motion/style-anchored generation (vidref)
+- [ ] Drawn/painted layer content can be pushed straight into a ref slot
+  (draw it → gen from it)
 
 ### Phase 9: Advanced Features — partially done
 - [ ] Chain Studio-style surgical regeneration:
   - Select specific frames on a layer → re-generate only those frames
   - "Regen selected" button in timeline context menu
   - Partial frame ranges for targeted regeneration
+- [ ] **Timeline right-click context menu (smooth, Chain Studio-style)**:
+  regen this clip/frame range · continue chain from here · use as context ·
+  duplicate cel/layer · delete · insert blank frames · copy/paste cels
+- [ ] **Prompt lane on the timeline (Chain Studio parity)**: Global Prompt
+  box = base prompt; per-segment prompt clips on a dedicated lane that
+  overlap the gen window get appended in timeline order. Supports
+  `<Picture i>` / `<Video k>` tags against the ref slots.
 - [x] Layer blending modes (multiply, screen, overlay) — applied in compositeFrame
 - [ ] Frame timing overrides (per-frame duration for non-uniform animation)
 - [ ] Layer group/folder support (group background layers, etc.)
@@ -214,6 +228,29 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 - [ ] Export layer stack as .aseprite file (with layers preserved)
 - [ ] Sprite sheet export from composited frames
 - [ ] Aseprite bridge: import .aseprite files as layer stacks
+
+### Phase 11: H3 chain continuation + video-to-video (Chain Studio parity) — NOT STARTED
+Build video continuation on the existing **ComfyUI-H3-Motion-Context** engine
+(interior keyframe anchors carry motion AND audio across clip joins) so long
+animations are chained clips instead of one drifting mega-gen:
+- [ ] **Video continuation**: continue the chain from the last clip — next
+  gen picks up exact motion/direction/speed where the previous clip ended
+  (H3 Motion Context: `continue_from` auto / specific clip semantics)
+- [ ] **Clip slots + fingerprint matching**: reuse the chain folder /
+  `chain_index.json` format so the Super Forge and Chain Studio can share
+  the same chains (match distance ≤ 0.20, re-roll vs advance behavior)
+- [ ] **Regen-in-place**: regenerate one clip in the middle of a chain —
+  context comes from its parent clip, save overwrites its slot
+  (Chain Studio `regen_clip` semantics; root regen = plain redo)
+- [ ] **Video-to-video**: load an external video/image as continuation
+  context (`context_video`) — re-render existing footage through the forge,
+  or use it as the chain seed (fingerprint matching still applies;
+  `if_no_match` = start_fresh / refuse)
+- [ ] **Gen window on the timeline**: the chain renders as clip segments on
+  the timeline; picking a segment + continue/regen drives `continue_from` /
+  `regen_clip` exactly like Chain Studio's panel buttons
+- [ ] Trim/preview per clip (`trim_frames` carried across, Chain Output
+  parity) so chained clips land on the sprite frame grid cleanly
 
 ---
 
@@ -268,3 +305,5 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 5. **Generation targets layers**: When you generate, you choose which layer receives the frames. "New Layer" creates a fresh layer. "Current Layer" fills the selected layer. This is how you build up complex sprites iteratively.
 
 6. **Backward compatible**: The backend still returns frames — the frontend just interprets them as a single default layer. Existing workflows continue to work.
+
+7. **Chain Studio parity for genning**: Refs, prompting, and continuation follow the ComfyUI-H3-Motion-Context Chain Studio model — panel-driven character slots (`<Picture i>`), reference video tracks (`<Video k>`), a global prompt + timeline prompt lane, and clip-chain continuation/regen via the H3 Motion Context engine (shared chain folder format, so chains made in either UI work in both). The Super Forge becomes the sprite-side editor on top of the same chain: gen/continue/regen in H3 land, then the forge pipeline pixelizes each clip onto its layer.
