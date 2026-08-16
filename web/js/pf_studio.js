@@ -1,4 +1,4 @@
-/* VERSION: v3.4.2-sockstrip (2026-08-16) — force cache bust
+/* VERSION: v3.4.3-maskleak (2026-08-16) — force cache bust
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -43,6 +43,11 @@
  * every tick (the old frontend's own geometry sync read stale layout state
  * after a resize, then stopped when the canvas was no longer dirty).
  *
+ * MASK REAPER (v3.4.3): a global watchdog reaps orphaned PrimeVue
+ * full-screen BlockUI masks (stuck spinner overlay from the App root) - the
+ * stuck mask freezes the whole page (sliders/canvas/menus all dead) after a
+ * workflow load. See the __pfsMaskReaper guard below.
+ *
  * FULL-FRAME (do not regress): the native socket rows are hidden
  * (node.drawSlots no-op) and the widget area starts right under the title bar
  * (node.widgets_start_y = SUITE_TOP), so the suite occupies the ENTIRE node
@@ -54,6 +59,33 @@
  * measured, so existing links keep their anchor positions; they are simply
  * not drawn and reserve no body space.
  */
+
+// --- global guard: reap orphaned PrimeVue full-screen BlockUI masks --------
+// frontend 1.48.x race: the App root mounts a full-screen BlockUI bound to the
+// global "spinner" store (main-*.js: blocked: spinner, fullScreen). A fast
+// block->unblock during workflow load leaves the mask with BOTH
+// p-overlay-mask-enter and p-overlay-mask-leave classes: PrimeVue's unblock()
+// waits for an animationend that never fires (the enter animation already
+// finished), so the invisible full-screen mask (z 1801, pointer-events auto)
+// plus the body scroll lock (p-overflow-hidden) stay forever and eat every
+// pointer event on the page - sliders, canvas, menus, everything.
+// A mask carrying -leave means the app already asked for it to go away, so
+// reap it once it has lingered > 1s, and release the body scroll lock when no
+// overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
+// the grace window never touches live UI.
+if (!window.__pfsMaskReaper) {
+    window.__pfsMaskReaper = setInterval(() => {
+        const now = Date.now();
+        let reaped = false;
+        for (const m of document.querySelectorAll(".p-blockui-mask.p-overlay-mask-leave")) {
+            const seen = m.__pfsLeaveSeen || (m.__pfsLeaveSeen = now);
+            if (now - seen > 1000) { m.remove(); reaped = true; }
+        }
+        if (reaped && !document.querySelector(".p-overlay-mask")) {
+            document.body.classList.remove("p-overflow-hidden");
+        }
+    }, 500);
+}
 
 const { app } = window.comfyAPI.app;
 
