@@ -1,4 +1,4 @@
-/* VERSION: v3.4.0-autoref (2026-08-16) — force cache bust
+/* VERSION: v3.4.1-presetui (2026-08-16) — force cache bust
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -1008,7 +1008,10 @@ function createForge(node, config) {
         opacVal.textContent = Math.round(v * 100) + "%";
         draw();
     });
-    opacSlider.addEventListener("pointerdown", (e) => e.stopPropagation());
+    opacSlider.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        try { opacSlider.setPointerCapture(e.pointerId); } catch (_) {}
+    });
     opacWrap.append(opacLbl, opacSlider, opacVal);
 
     // Generation target dropdown
@@ -1365,18 +1368,32 @@ function createForge(node, config) {
             const hasRange = !isSeed && w.options && w.options.min !== undefined && w.options.max !== undefined;
             const step = (w.options && w.options.step > 0) ? w.options.step : 1;
             const isInt = Number.isInteger(step);
+            // -1 sentinel = "inherit the Look/strength preset" (backend _pick).
+            // Show it as a readable placeholder instead of a raw -1 that looks
+            // like a broken value.
+            const presetSentinel = w.options && w.options.min === -1;
+            const showVal = (v) => (presetSentinel && (v === -1 || v === "-1")) ? "" : v;
             const num = document.createElement("input");
-            num.type = "number"; num.value = w.value;
+            num.type = "number"; num.value = showVal(w.value);
             num.min = w.options?.min ?? ""; num.max = w.options?.max ?? ""; num.step = step;
+            if (presetSentinel) {
+                num.placeholder = "preset";
+                num.title = (w.options?.tooltip || "") + " (empty / -1 = preset)";
+            }
             let slider = null;
+            let sliding = false;
             const commit = (raw) => {
-                let v = parseFloat(raw);
-                if (!Number.isFinite(v)) v = w.value;
-                if (isInt) v = Math.round(v);
-                if (w.options?.min !== undefined) v = Math.max(w.options.min, v);
-                if (w.options?.max !== undefined) v = Math.min(w.options.max, v);
+                let v;
+                if (presetSentinel && (raw === "" || raw === "preset")) v = -1;
+                else {
+                    v = parseFloat(raw);
+                    if (!Number.isFinite(v)) v = w.value;
+                    if (isInt) v = Math.round(v);
+                    if (w.options?.min !== undefined) v = Math.max(w.options.min, v);
+                    if (w.options?.max !== undefined) v = Math.min(w.options.max, v);
+                }
                 setWidgetValue(w, v);
-                num.value = v;
+                num.value = showVal(v);
                 if (slider) slider.value = v;
             };
             if (hasRange) {
@@ -1385,10 +1402,20 @@ function createForge(node, config) {
                 slider.min = w.options.min; slider.max = w.options.max;
                 slider.step = step; slider.value = w.value;
                 slider.addEventListener("input", () => {
-                    num.value = slider.value;
+                    num.value = showVal(parseFloat(slider.value));
                     commit(slider.value);
                 });
-                slider.addEventListener("pointerdown", (e) => e.stopPropagation());
+                // never let a sync yank the thumb mid-drag; capture the pointer
+                // ourselves so a canvas-level pointer capture (Vue frontend)
+                // can't steal the drag and freeze the thumb
+                slider.addEventListener("pointerdown", (e) => {
+                    sliding = true; e.stopPropagation();
+                    try { slider.setPointerCapture(e.pointerId); } catch (_) {}
+                });
+                const slideEnd = () => { sliding = false; };
+                slider.addEventListener("pointerup", slideEnd);
+                slider.addEventListener("pointercancel", slideEnd);
+                window.addEventListener("pointerup", slideEnd);
                 row.appendChild(slider);
             }
             num.addEventListener("change", () => commit(num.value));
@@ -1406,7 +1433,8 @@ function createForge(node, config) {
             }
             ctl = num;
             sync = () => {
-                if (String(num.value) !== String(w.value)) num.value = w.value;
+                if (sliding) return;  // drag in progress — the slider is the truth
+                if (String(num.value) !== String(showVal(w.value))) num.value = showVal(w.value);
                 if (slider && String(slider.value) !== String(w.value)) slider.value = w.value;
             };
         }

@@ -37,7 +37,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .pf_easy import PixelForgeEasyExport, PixelForgeEasyPrompt
+from .pf_easy import PixelForgeEasyExport, PixelForgeEasyPrompt, _BACKGROUNDS
 from .pf_sampler import PixelForgeH3FlatSigmas, PixelForgeH3PixelSampler
 from .pf_studio import PixelForgeSuperForge, _save_stage
 
@@ -144,6 +144,21 @@ def _hex_rgba(h, fallback=(0, 255, 0, 255)):
         return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255)
     except Exception:
         return fallback
+
+
+def _ref_flat_hex(forge):
+    """Color the suite ref is flattened onto before ref2va. The H3 gen
+    continues the ref's background, so this MUST be the color the forge
+    will key out — otherwise the backdrop survives the keyer (and the
+    keyer eats sprite pixels that match the WRONG target color).
+    auto = green screen (auto-detect keys whatever dominates, green is
+    the safest); custom hex / explicit backdrops flatten onto themselves."""
+    bg = forge.get("background", "auto (detect)")
+    if bg in ("auto (detect)", "custom hex"):
+        return forge.get("custom_bg_hex", "#00FF00")
+    hexv = _BACKGROUNDS.get(bg)
+    return hexv if isinstance(hexv, str) and hexv.startswith("#") \
+        else forge.get("custom_bg_hex", "#00FF00")
 
 
 def _load_drawn_ref(name, width, height, bg_hex, dx=0, dy=0):
@@ -478,12 +493,15 @@ class PixelForgeOneForge:
             # Suite placement dot steers where slot refs land on the gen frame.
             _pdx = int(forge.get("placement_x", 0) or 0)
             _pdy = int(forge.get("placement_y", 0) or 0)
+            # Refs are flattened onto the color the forge will actually key
+            # (green for auto/custom, the explicit backdrop otherwise) so the
+            # gen's background keys out instead of surviving + eating holes.
+            _ref_bg = _ref_flat_hex(forge)
             if first_frame is not None:
                 refs["ref_image_1"] = first_frame
             elif drawn_ref_image:
                 dref = _load_drawn_ref(drawn_ref_image, width, height,
-                                       forge.get("custom_bg_hex", "#00FF00"),
-                                       dx=_pdx, dy=_pdy)
+                                       _ref_bg, dx=_pdx, dy=_pdy)
                 if dref is not None:
                     refs["ref_image_1"] = dref
                     log_lines.append(
@@ -493,8 +511,7 @@ class PixelForgeOneForge:
                 refs["ref_image_2"] = ref_image_2
             elif drawn_ref_image_2:
                 dref2 = _load_drawn_ref(drawn_ref_image_2, width, height,
-                                        forge.get("custom_bg_hex", "#00FF00"),
-                                        dx=_pdx, dy=_pdy)
+                                        _ref_bg, dx=_pdx, dy=_pdy)
                 if dref2 is not None:
                     refs["ref_image_2"] = dref2
                     log_lines.append(
@@ -530,7 +547,8 @@ class PixelForgeOneForge:
             r2v = getattr(mm, "MiniMaxH3ReferenceToVideo", None)
             if r2v is not None:
                 if refs:
-                    log_lines.append(f"refs: {len(refs)} image(s) @ {ref_image_size}")
+                    log_lines.append(f"refs: {len(refs)} image(s) @ {ref_image_size} "
+                                     f"(flattened onto {_ref_bg} = forge key target)")
                 cond, latent = _unpack(r2v.execute(
                     clip=clip, vae=vae, audio_vae=None, prompt=ref_prompt,
                     width=width, height=height, length=length,
