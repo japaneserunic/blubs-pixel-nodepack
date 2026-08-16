@@ -5,12 +5,16 @@
 **blubs pixel nodes** — a ComfyUI custom node pack that turns **MiniMax H3** video
 output into real, game-ready **pixel-art sprite animations**: palette-locked frames,
 keyed alpha, anchored crops, loop trimming, sprite sheets, GIFs, and a headless
-**Aseprite bridge**. Fully self-contained and **non-destructive**: adds one folder
-under `custom_nodes/`, modifies nothing else, and depends only on
+**Aseprite bridge**. Run it as individual nodes, as 2-node Easy mode, or as the
+**ᛒᛚᚢᛒ Super Pixel Forge** — an all-in-one workspace node with its own canvas,
+stage previews, and timeline. Fully self-contained and **non-destructive**: adds one
+folder under `custom_nodes/`, modifies nothing else, and depends only on
 `torch` / `numpy` / `PIL` (already in the ComfyUI venv).
 
 > ⚠️ **Public test build.** The core sprite pipeline (gen → key → quantize → crop →
-> loop → sheet → GIF) is stable and ready for testing. The **Aseprite export/bridge
+> loop → sheet → GIF) is stable and ready for testing, and the **ᛒᛚᚢᛒ Super Pixel
+> Forge / One Forge workspace nodes** are the new flagship way to run it — they're
+> fresh, so UI rough edges are expected. The **Aseprite export/bridge
 > nodes are still being finished** — PNG sequence + `frames.json` export works, but
 > the headless `.aseprite` build and the Aseprite-side extension are experimental.
 > Everything degrades gracefully: no Aseprite → PNGs + JSON only, nothing breaks.
@@ -38,7 +42,9 @@ under `custom_nodes/`, modifies nothing else, and depends only on
    If you want to be explicit: `pip install -r requirements.txt` inside your
    ComfyUI venv.
 
-3. **Restart ComfyUI.** Nodes appear under the `PixelForge/*` category.
+3. **Restart ComfyUI.** Nodes appear under the `PixelForge/*` category (Easy
+   variants under `PixelForge/Easy`). The workspace UI (`web/js/pf_studio.js`)
+   loads automatically with the frontend — no extra step.
 
 ## Requirements (for the bundled v7 workflow)
 
@@ -69,11 +75,17 @@ Grab them from the same place you got your MiniMax H3 setup (see the H3 pack REA
 above for download links). Any H3-compatible checkpoint works — just reselect it in
 the loader nodes.
 
-**Workflow:** drag [`example_workflows/pixelforge_h3_sprite_easy_v2.json`](example_workflows/pixelforge_h3_sprite_easy_v2.json)
-into ComfyUI — the **Easy v2** build: same H3 gen side, whole post chain condensed
-into 2 nodes. If anything is missing, use *Manager → Install Missing Custom Nodes*.
-Full-control variant: `pixelforge_h3_sprite_v7.json` (every knob exposed).
-Companion workflows: `pixelforge_h3_sprite_still_v2.json` (single sprite) and
+**Workflows:** drag [`example_workflows/pixelforge_h3_super_forge.json`](example_workflows/pixelforge_h3_super_forge.json)
+into ComfyUI — the **ᛒᛚᚢᛒ Super Pixel Forge**: the whole forge pipeline inside a
+single workspace-node UI (canvas, stage tabs, timeline — see the suite section
+below). Want the ENTIRE workflow as one node (loaders + sampling + forge +
+export, zero wires)? Use
+[`example_workflows/pixelforge_h3_one_forge.json`](example_workflows/pixelforge_h3_one_forge.json).
+If anything is missing, use *Manager → Install Missing Custom Nodes*.
+Classic builds: `pixelforge_h3_sprite_easy_v2.json` (Easy v2 — same H3 gen side,
+post chain condensed into 2 nodes) and `pixelforge_h3_sprite_v7.json`
+(every knob exposed, full control). Companion workflows:
+`pixelforge_h3_sprite_still_v2.json` (single sprite) and
 `pixelforge_h3_sprite_edit_v2.json` (edit an existing sprite via ref2va).
 
 **De-rope variant:** `pixelforge_h3_derope_v1.json` takes a clip you've *already
@@ -138,6 +150,48 @@ automatically. The full node set is untouched; both coexist.
   Wire `h3_prompt` + `length_frames` straight into `MiniMaxH3ImageToVideo`.
 
 Bundled as `example_workflows/pixelforge_h3_sprite_easy_v2.json`.
+
+## 🛡️ The suite — ᛒᛚᚢᛒ Super Pixel Forge & One Forge
+
+Two flagship nodes that wrap the stack in a **full workspace UI, inside one
+ComfyUI node**: a pixel-perfect canvas with zoom/pan/onion-skin, **stage tabs
+that preview the frames after every pipeline stage** (source → keyed → grid →
+look → motion → final), a transport with fps playback, and a frame timeline
+with thumbnails and scrubbing. The interface resizes with the node frame and
+persists its state in the workflow. All processing stays on the same engines
+as the individual nodes — zero copied code, non-destructive.
+
+- **ᛒᛚᚢᛒ PIXEL FORGE** (`PixelForgeSuperForge`) — wire any decoded H3 batch in
+  and forge it. Every Easy knob plus all advanced engine params, grouped so the
+  main knobs stay obvious. The stage previews are the direct answer to "why
+  does the processed sprite look worse than the raw H3 video?" — you see
+  exactly which stage loses the quality.
+  Example: `example_workflows/pixelforge_h3_super_forge.json`.
+- **ᛒᛚᚢᛒ ONE FORGE** (`PixelForgeOneForge`) — the entire workflow collapsed
+  into ONE node: model loaders, attention/FFN patches, turbo LoRA, prompt
+  builder, **ref2va conditioning**, sampling, VAE decode, the full forge
+  pipeline, and GIF/sheet/aseprite export. Suite UI is tabbed:
+  ⚡ Generate (prompt / references / resolution / models / sampling / speed) ·
+  🎨 Forge · 📦 Export. Optional sockets are the only pins: `images` (bypass
+  generation, forge an existing batch), `first_frame` + `ref_image_2`
+  (reference pictures — become `<Picture 1>` / `<Picture 2>`, tags
+  auto-appended to the prompt), `alpha`, `custom_palette_image`.
+  Example: `example_workflows/pixelforge_h3_one_forge.json` — one node, zero
+  wires.
+
+  Reference notes: conditioning runs through `MiniMaxH3ReferenceToVideo` —
+  nothing wired = plain t2v; refs wired = reference-anchored gen.
+  `ref_image_size`: `match` scales refs to the gen size (fast); `max` keeps
+  refs at 2048px for best identity fidelity (several times slower). Reference
+  anchoring needs a ref2va-capable checkpoint (e.g. a hybrid fl2va+ref2va
+  build) — plain t2v works on any H3 checkpoint. On cores that predate the
+  ref2va node, One Forge falls back to `MiniMaxH3ImageToVideo` automatically.
+  Audio refs are intentionally not exposed — the sprite pipeline is silent.
+
+**Roadmap:** the suite is growing into an Aseprite-level editor — layers,
+keyframes, compositing, canvas draw tools, surgical regeneration. Dev
+checklists live in [`docs/`](docs) (`SUPER_FORGE_V3_CHECKLIST.md`,
+`ONEFORGE.md`).
 
 ## Nodes (category `PixelForge/*`)
 

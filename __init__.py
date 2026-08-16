@@ -15,6 +15,10 @@ from .pf_grid import NODE_CLASS_MAPPINGS as _G_C, NODE_DISPLAY_NAME_MAPPINGS as 
 from .pf_sampler import NODE_CLASS_MAPPINGS as _S_C, NODE_DISPLAY_NAME_MAPPINGS as _S_D
 from .pf_temporal import NODE_CLASS_MAPPINGS as _T_C, NODE_DISPLAY_NAME_MAPPINGS as _T_D
 from .pf_easy import NODE_CLASS_MAPPINGS as _E_C, NODE_DISPLAY_NAME_MAPPINGS as _E_D
+from .pf_studio import NODE_CLASS_MAPPINGS as _FS_C, NODE_DISPLAY_NAME_MAPPINGS as _FS_D
+from .pf_oneforge import NODE_CLASS_MAPPINGS as _OF_C, NODE_DISPLAY_NAME_MAPPINGS as _OF_D
+
+WEB_DIRECTORY = "./web"
 
 NODE_CLASS_MAPPINGS = {
     **_Q_C,
@@ -37,6 +41,8 @@ NODE_CLASS_MAPPINGS = {
     **_S_C,
     **_T_C,
     **_E_C,
+    **_FS_C,
+    **_OF_C,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -60,6 +66,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **_S_D,
     **_T_D,
     **_E_D,
+    **_FS_D,
+    **_OF_D,
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
