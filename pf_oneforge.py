@@ -429,6 +429,17 @@ class PixelForgeOneForge:
         required.update(gen)
         required.update(forge_required)
         required.update(export)
+        # One Forge out-of-box defaults = the battle-tested config (owner's
+        # known-good, verified across the 2026-08-16 sessions): square 1:1
+        # 0.3MP canvas (single character fills it; ~2.5x fewer pixels to gen
+        # than 16:9 0.5MP), Hi-bit cel shading look, 16 colors. SuperForge /
+        # Easy defs stay untouched — these overrides apply to THIS node only.
+        for _k, _dv in {"gen_size": "1:1 · 0.3MP (544x544)",
+                        "gen_width": 544, "gen_height": 544,
+                        "look": "Hi-bit cel shading",
+                        "colors": 16}.items():
+            _t, _meta = required[_k]
+            required[_k] = (_t, {**(_meta or {}), "default": _dv})
         optional = {
             "images": ("IMAGE",),
             "first_frame": ("IMAGE", {"tooltip": "Character/subject reference — becomes <Picture 1> "
@@ -457,8 +468,21 @@ class PixelForgeOneForge:
 
         # ---------------- 1. generate (unless images wired in) ----------------
         if images is None:
-            prompt, length, _pfps = PixelForgeEasyPrompt().run(
-                character, action, style, seconds, seamless_loop)
+            # Backdrop sync (v3.6.0): the gen prompt must request the SAME
+            # color the forge will key — and the same color suite refs flatten
+            # onto (_ref_flat_hex). Before this, EasyPrompt hardcoded
+            # "chroma green": any non-green Backdrop choice produced a gen on
+            # green that the keyer never touched (backdrop survives), while
+            # sprite pixels matching the WRONG target keyed out (holes).
+            # Measured on run d85671cd2d: 84.7% of the "sprite" was surviving
+            # green, ~8.3k interior px eaten per frame with key #FFFFFF.
+            _ref_bg = _ref_flat_hex(forge)
+            prompt = PixelForgeH3Prompt._build(
+                character, action, style, "side",
+                clause_for_hex(_ref_bg) + ".", seamless_loop, "")
+            length = PixelForgeH3Prompt.snap_frames(seconds)
+            _pfps = _H3_FPS
+            log_lines.append(f"backdrop: {_ref_bg} (prompt/ref/key synced)")
             # Prompt lane: overlapping timeline segments append in order
             # (Chain Studio parity). gen_win_start is the regen offset.
             prompt, _lane_n = _assemble_lane_prompts(
@@ -496,7 +520,8 @@ class PixelForgeOneForge:
             # Refs are flattened onto the color the forge will actually key
             # (green for auto/custom, the explicit backdrop otherwise) so the
             # gen's background keys out instead of surviving + eating holes.
-            _ref_bg = _ref_flat_hex(forge)
+            # _ref_bg was resolved at prompt build time (backdrop sync) —
+            # prompt, ref flatten and keyer all target the same color.
             if first_frame is not None:
                 refs["ref_image_1"] = first_frame
             elif drawn_ref_image:

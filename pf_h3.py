@@ -40,7 +40,49 @@ _BACKGROUNDS = {
     "simple scene": ("very simple flat-color pixel background that stays static, "
                      "in one solid color that strongly contrasts with the character "
                      "(never white, never any of the character's own colors)"),
+    # v3.6.0: white/blue variants so the One Forge can prompt for ANY backdrop
+    # the forge keyer targets (the backdrop-sync fix needs the full vocab).
+    "chroma blue": ("The background is a flat solid chroma blue screen, pure #0000FF: "
+                    "an empty featureless blue void filling everything behind the "
+                    "character. No ground, no floor, no horizon, no scenery, no props, "
+                    "no shadows, no gradient, no environment details — nothing but "
+                    "uniform flat blue behind the sprite"),
+    "solid white": ("The background is a flat solid pure white screen, pure #FFFFFF: "
+                    "an empty featureless white void filling everything behind the "
+                    "character. No ground, no floor, no horizon, no scenery, no props, "
+                    "no shadows, no gradient, no environment details — nothing but "
+                    "uniform flat white behind the sprite"),
 }
+
+
+def clause_for_hex(hex_str):
+    """Backdrop prompt clause for an arbitrary forge key hex.
+
+    The gen prompt, the suite ref flatten, and the forge keyer must ALL target
+    the same color — v3.6.0 backdrop sync. (Before it, the One Forge prompt
+    hardcoded 'chroma green': any non-green Backdrop choice left the green
+    backdrop surviving the keyer while sprite pixels matching the WRONG target
+    keyed out as holes — measured on forge run d85671cd2d, 2026-08-16.)
+    Exact vocab text for the known chroma colors; a templated flat-void clause
+    for anything else (custom hex).
+    """
+    h = str(hex_str or "").strip().upper()
+    if not h.startswith("#"):
+        h = "#" + h
+    known = {
+        "#00FF00": _BACKGROUNDS["chroma green"],
+        "#FF00FF": _BACKGROUNDS["chroma magenta"],
+        "#0000FF": _BACKGROUNDS["chroma blue"],
+        "#000000": _BACKGROUNDS["solid black"],
+        "#FFFFFF": _BACKGROUNDS["solid white"],
+    }
+    if h in known:
+        return known[h]
+    return ("The background is a flat solid uniform {0} screen: an empty "
+            "featureless void in exactly {0} filling everything behind the "
+            "character. No ground, no floor, no horizon, no scenery, no props, "
+            "no shadows, no gradient, no environment details — nothing but "
+            "uniform flat {0} behind the sprite").format(h)
 
 
 class PixelForgeH3Prompt:
@@ -79,7 +121,11 @@ class PixelForgeH3Prompt:
             n += 1
         return n
 
-    def run(self, subject, action, style, view, background, seamless_loop, seconds, extra_notes):
+    @staticmethod
+    def _build(subject, action, style, view, bg_clause, seamless_loop,
+               extra_notes):
+        """Prompt text from parts. bg_clause is the full backdrop sentence
+        (vocab entry or clause_for_hex output), period appended by callers."""
         parts = [
             "Retro video game sprite animation, %s." % _STYLES[style],
             "%s, %s." % (subject.strip().rstrip("."), _VIEWS[view]),
@@ -87,7 +133,7 @@ class PixelForgeH3Prompt:
             "Full body visible, the character is large in frame (roughly two-thirds "
             "of the frame height) and stays fully inside the frame for the entire clip.",
             "Completely static orthographic camera, no pan, no zoom, no parallax.",
-            _BACKGROUNDS[background] + ".",
+            bg_clause,
             "Crisp square pixels, limited color palette, clean silhouette, "
             "no anti-aliasing, no blur, no gradients, no glow, no dithering, "
             "no stippling, no noise or grain texture, no text, no watermark.",
@@ -97,7 +143,12 @@ class PixelForgeH3Prompt:
                          "exactly in the pose it started in.")
         if extra_notes.strip():
             parts.append(extra_notes.strip())
-        prompt = " ".join(parts)
+        return " ".join(parts)
+
+    def run(self, subject, action, style, view, background, seamless_loop, seconds, extra_notes):
+        prompt = self._build(subject, action, style, view,
+                             _BACKGROUNDS[background] + ".",
+                             seamless_loop, extra_notes)
         return (prompt, self.snap_frames(seconds), FPS)
 
 
