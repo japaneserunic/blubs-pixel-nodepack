@@ -187,6 +187,64 @@ def _load_drawn_ref(name, width, height, bg_hex, dx=0, dy=0):
         log.warning("[OneForge] drawn ref load failed for %r: %s", name, e)
         return None
 
+
+# ---------------------------------------------------------------- video ref
+def _load_ref_video(name, fps=24.0, max_seconds=15.0):
+    """Load a suite video-reference clip (mp4/webm/...) for ref2va <Video k>.
+
+    Decodes with PyAV (same decoder Chain Studio uses), resamples to 24 fps,
+    caps at 15s (ref2va's trained range). Resolution is left to the core
+    node (adapt_canvas); the n%17==5 frame-grid trim is core-side too.
+    Sprite pipeline is silent — the soundtrack is dropped, never encoded.
+    Returns an IMAGE tensor [N,H,W,3], or None on any problem."""
+    try:
+        base = str(name or "").strip()
+        if not base:
+            return None
+        # resolve like Chain Studio: annotated input path, temp fallback
+        path = None
+        try:
+            path = folder_paths.get_annotated_filepath(base)
+        except Exception:
+            path = None
+        if not path or not os.path.isfile(path):
+            tpath = os.path.join(folder_paths.get_temp_directory(),
+                                 os.path.basename(base))
+            path = tpath if os.path.isfile(tpath) else None
+        if path is None:
+            log.warning("[OneForge] video ref %r not found", base)
+            return None
+        import av
+        container = av.open(path)
+        stream = container.streams.video[0]
+        tb = float(stream.time_base)
+        raw = []
+        for frame in container.decode(stream):
+            t = float(frame.pts * tb) if frame.pts is not None \
+                else len(raw) / fps
+            raw.append((t, torch.from_numpy(
+                frame.to_ndarray(format="rgb24")).float() / 255.0))
+        container.close()
+        if not raw:
+            return None
+        dur = raw[-1][0] - raw[0][0] if len(raw) > 1 else 1.0 / fps
+        n = max(5, min(int(round(dur * fps)) + 1, int(max_seconds * fps)))
+        times = [t for t, _ in raw]
+        out = []
+        for i in range(n):
+            target = raw[0][0] + i / fps
+            idx = 0
+            while idx + 1 < len(times) and times[idx + 1] <= target:
+                idx += 1
+            out.append(raw[idx][1])
+        frames = torch.stack(out)
+        log.info("[OneForge] video ref %s: %df decoded -> %df @ 24fps",
+                 base, len(raw), frames.shape[0])
+        return frames
+    except Exception as e:  # never let a ref helper kill the whole gen
+        log.warning("[OneForge] video ref load failed for %r: %s", name, e)
+        return None
+
 # ==================================================================== node
 class PixelForgeOneForge:
     """Prompt in one end, game-ready sprite out the other. One node, no wires."""
@@ -204,7 +262,9 @@ class PixelForgeOneForge:
                    "UI tabs (Generate / Forge / Export). Wire the optional "
                    "images socket to skip generation and forge an existing "
                    "batch; wire first_frame / ref_image_2 to anchor the gen "
-                   "with reference pictures (<Picture 1> / <Picture 2>).")
+                   "with reference pictures (<Picture 1> / <Picture 2>), or "
+                   "arm the suite's V1 slot to anchor motion/style with a "
+                   "reference clip (<Video 1>).")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -290,6 +350,13 @@ class PixelForgeOneForge:
                                 "tooltip": "Suite ref slot 2 (temp PNG filename). Set by the suite's "
                                            "ref-slot buttons; becomes <Picture 2> when no ref_image_2 "
                                            "is wired."}),
+            # Video ref slot (<Video 1>) — suite-imported clip for
+            # motion/style-anchored genning (Chain Studio vidref parity).
+            # Also MUST stay last (widget-value alignment).
+            "ref_video_1": ("STRING", {"default": "",
+                            "tooltip": "Suite video reference (input-dir filename). Set by the "
+                                       "suite's V1 button; becomes <Video 1> in the ref2va "
+                                       "conditioning — anchors motion/style. 2-15s clips, silent."}),
         }
         required = {}
         required.update(gen)
@@ -314,7 +381,7 @@ class PixelForgeOneForge:
             attention_backend, ffn_chunks, ffn_seq_threshold,
             filename_prefix, export_fps, make_gif, gif_size, make_sheet,
             sheet_columns, sheet_bg, build_aseprite, aseprite_path,
-            drawn_ref_image="", drawn_ref_image_2="",
+            drawn_ref_image="", drawn_ref_image_2="", ref_video_1="",
             images=None, first_frame=None, ref_image_2=None,
             alpha=None, custom_palette_image=None,
             **forge):
@@ -373,13 +440,32 @@ class PixelForgeOneForge:
                     refs["ref_image_2"] = dref2
                     log_lines.append(
                         f"ref slot 2: {os.path.basename(drawn_ref_image_2)} -> <Picture 2>")
+            # Suite video ref slot (V1): motion/style anchor -> <Video 1>.
+            vrefs = {}
+            if ref_video_1:
+                vframes = _load_ref_video(ref_video_1)
+                if vframes is not None:
+                    vrefs["ref_video_1"] = vframes
+                    log_lines.append(
+                        f"video ref: {os.path.basename(ref_video_1)} -> <Video 1> "
+                        f"({vframes.shape[0]}f @ 24fps)")
             ref_prompt = prompt
-            if refs:
+            if refs or vrefs:
                 # Tags must match the ACTUAL ref slots used (slot 2 alone is
-                # still <Picture 2>), not a 1..N range.
-                tags = ", ".join(f"<Picture {k.rsplit('_', 1)[1]}>"
-                                 for k in sorted(refs))
-                ref_prompt = f"{prompt.rstrip()} The subject matches {tags}."
+                # still <Picture 2>), not a 1..N range. Only bind tags the
+                # prompt doesn't already name (Chain Studio bind semantics).
+                itags = [f"<Picture {k.rsplit('_', 1)[1]}>" for k in sorted(refs)]
+                vtags = [f"<Video {k.rsplit('_', 1)[1]}>" for k in sorted(vrefs)]
+                bits = []
+                miss_i = [t for t in itags if t not in prompt]
+                miss_v = [t for t in vtags if t not in prompt]
+                if miss_i:
+                    bits.append("The subject matches " + ", ".join(miss_i) + ".")
+                if miss_v:
+                    bits.append("The motion and style match "
+                                + ", ".join(miss_v) + ".")
+                if bits:
+                    ref_prompt = f"{prompt.rstrip()} {' '.join(bits)}"
 
             print("[OneForge] encoding prompt…", flush=True)
             r2v = getattr(mm, "MiniMaxH3ReferenceToVideo", None)
@@ -390,10 +476,13 @@ class PixelForgeOneForge:
                     clip=clip, vae=vae, audio_vae=None, prompt=ref_prompt,
                     width=width, height=height, length=length,
                     ref_image_size=ref_image_size,
-                    ref_images=refs or None))[:2]
+                    ref_images=refs or None,
+                    ref_videos=vrefs or None))[:2]
             else:
                 # core predates ref2va — fall back to the i2v node
                 log_lines.append("ref2va missing on this core, using i2v")
+                if vrefs:
+                    log_lines.append("video refs ignored (no ref2va on this core)")
                 cond, latent = _unpack(mm.MiniMaxH3ImageToVideo.execute(
                     clip=clip, vae=vae, prompt=ref_prompt, width=width,
                     height=height, length=length, first_frame=first_frame))[:2]

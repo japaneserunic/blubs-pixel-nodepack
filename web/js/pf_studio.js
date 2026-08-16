@@ -433,6 +433,7 @@ function createForge(node, config) {
         showPlacementDot: true,
         drawnRef: false,      // drawn-ref armed (One Forge): drawing -> <Picture 1>
         refSlots: { p1: "", p2: "" },  // armed gen-ref slots (temp PNG names)
+        vidRef: "",           // armed video-ref slot V1 (input-dir clip name)
 
         // Generation target
         genTarget: "new",     // "new" | "current" | <layerId>
@@ -700,6 +701,7 @@ function createForge(node, config) {
         node.properties.pfs_showDebugStages = st.showDebugStages;
         node.properties.pfs_drawnRef = st.drawnRef;
         node.properties.pfs_refSlots = { ...st.refSlots };
+        node.properties.pfs_vidRef = st.vidRef || "";
     }
 
     function restoreLayerProps() {
@@ -737,6 +739,7 @@ function createForge(node, config) {
         if (p.pfs_refSlots && typeof p.pfs_refSlots === "object") {
             st.refSlots = { p1: p.pfs_refSlots.p1 || "", p2: p.pfs_refSlots.p2 || "" };
         }
+        st.vidRef = p.pfs_vidRef || "";
     }
 
     // ---- DOM skeleton ----
@@ -1046,6 +1049,25 @@ function createForge(node, config) {
         refSlotWrap.appendChild(b);
     }
     refSlotWrap.insertBefore(refSlotLbl, refSlotWrap.firstChild);
+    // ---- video ref slot V1 (One Forge): import a clip as ref2va
+    // <Video 1> — motion/style anchor. Chain Studio vidref parity: the
+    // clip goes to the input dir via /upload/image, the backend decodes +
+    // resamples it to 24fps. Sprite pipeline is silent (no soundtrack). ----
+    const vidFileIn = document.createElement("input");
+    vidFileIn.type = "file"; vidFileIn.accept = "video/*"; vidFileIn.style.display = "none";
+    root.appendChild(vidFileIn);
+    vidFileIn.addEventListener("change", async () => {
+        const f = vidFileIn.files && vidFileIn.files[0];
+        vidFileIn.value = "";
+        if (f) await uploadVidRef(f);
+    });
+    const btnVidRef = mkLyrBtn("V1", "Gen-ref slot <Video 1>: import a video clip (2-15s) "
+        + "as the motion/style reference for generation — walk cycles, attack swings, "
+        + "camera moves. Armed slot glows; click again to clear.", () => {
+        if (st.vidRef) { clearVidRef(); return; }
+        vidFileIn.click();
+    });
+    refSlotWrap.appendChild(btnVidRef);
     function refreshRefSlots() {
         for (const slot of ["p1", "p2"]) {
             const b = refSlotBtns[slot];
@@ -1056,6 +1078,12 @@ function createForge(node, config) {
                 ? `${slot.toUpperCase()} armed: ${st.refSlots[slot]} — click to clear, or re-push after editing the layer`
                 : `Gen-ref slot: push the ACTIVE layer's current frame as ${slot === "p1" ? "<Picture 1>" : "<Picture 2>"}`;
         }
+        const varmed = !!st.vidRef;
+        btnVidRef.classList.toggle("on", varmed);
+        btnVidRef.style.color = varmed ? "#ff9d45" : "";
+        btnVidRef.title = varmed
+            ? `V1 armed: ${st.vidRef} — click to clear, or re-import to replace`
+            : "Gen-ref slot: import a video clip (2-15s) as <Video 1> — the motion/style reference";
     }
     if (config.tabs) {
         layerBar.appendChild(refSlotWrap);
@@ -2330,6 +2358,37 @@ function createForge(node, config) {
         const w = widgetByName(wname);
         if (w) setWidgetValue(w, "");
         st.refSlots[slot] = "";
+        saveLayerProps(); refreshRefSlots();
+    }
+
+    // ---- video ref slot V1: import a clip as <Video 1> (motion/style) ----
+    async function uploadVidRef(file) {
+        const w = widgetByName("ref_video_1");
+        if (!w) { console.info("[PixelForge] video ref: backend has no ref_video_1 widget (Super Forge?)"); return; }
+        if (file.size > 50 * 1024 * 1024) {
+            console.warn("[PixelForge] video ref: clip is over 50MB — trim it to the 2-15s you actually need");
+            return;
+        }
+        try {
+            const fd = new FormData();
+            fd.append("image", file, `pf_vidref_${node.id}_${Date.now().toString(36)}_${file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_")}`);
+            fd.append("type", "input");
+            fd.append("overwrite", "true");
+            const r = await fetch("/upload/image", { method: "POST", body: fd });
+            const j = await r.json();
+            if (j && j.name) {
+                const v = (j.subfolder ? j.subfolder + "/" : "") + j.name;
+                setWidgetValue(w, v);
+                st.vidRef = v;
+                saveLayerProps(); refreshRefSlots();
+                console.info("[PixelForge] video ref V1 armed:", v);
+            }
+        } catch (e) { console.warn("[PixelForge] video ref upload failed:", e); }
+    }
+    function clearVidRef() {
+        const w = widgetByName("ref_video_1");
+        if (w) setWidgetValue(w, "");
+        st.vidRef = "";
         saveLayerProps(); refreshRefSlots();
     }
 

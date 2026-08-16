@@ -191,7 +191,7 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
 - [x] Generation targeting UI: dropdown in toolbar ("Gen→" New Layer / Current / layer names)
 - [x] Layer-aware preview: show composited result, not just one layer
 
-### Phase 8: Ref Input Support (Chain Studio-style ref genning) — mostly done
+### Phase 8: Ref Input Support (Chain Studio-style ref genning) — ✅ DONE
 - [x] Reference images can be placed as dedicated reference layers (🔖 toggle
   on any layer, or 📥 import an image file straight into a ref layer)
 - [x] Reference layers are locked + semi-transparent by default (40% opacity;
@@ -207,8 +207,13 @@ Transform the Super Pixel Forge from a "pipeline stage viewer" into a **real spr
   still wins over each slot.
 - [x] Drawn/painted layer content can be pushed straight into a ref slot
   (draw it → P1/P2 → gen from it; drawn-ref composite toggle still works)
-- [ ] **Reference video clips → `<Video k>` tags**: attach a clip as a
-  reference track for motion/style-anchored generation (vidref)
+- [x] **Reference video clips → `<Video k>` tags**: V1 slot in the layer bar
+  (next to P1/P2) — import a 2-15s clip (≤50MB, goes to the input dir like
+  Chain Studio panel media), the backend decodes + resamples it to 24fps and
+  passes it to ref2va as `ref_videos` (`ref_video_1` hidden widget, kept last
+  for workflow alignment). Silent pipeline: soundtracks dropped, audio_vae
+  never touched. Prompt auto-binds "The motion and style match `<Video 1>`."
+  (only tags the prompt doesn't already name, Chain Studio bind semantics)
 - [x] Generation targeting actually honored on ingest: Gen→ New/Current/
   named layer fills in place (identity/transform/keyframes survive regen),
   and USER layers (refs/imports/painted) are never wiped by executions
