@@ -1,4 +1,4 @@
-/* VERSION: v3.5.4-fallback (2026-08-16) — manual-drive fallback when native range drags stall + deeper gesture forensics
+/* VERSION: v3.5.5-stepfix (2026-08-16) — ROOT CAUSE of the stuck-slider saga: frontend stores options.step x10 (raw in step2); sliders were 10x coarser, narrow ranges frozen solid
  * ᛒᛚᚢᛒ Pixel Forge suite — in-node workspace for PixelForgeSuperForge and
  * PixelForgeOneForge (all-in-one).
  *
@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.5.4-fallback — native-stall-proof sliders + gesture forensics");
-const PFS_VERSION = "v3.5.4-fallback";
+console.info("[PixelForge] pf_studio v3.5.5-stepfix — options.step /10 (frontend x10 quirk) + fallback + forensics");
+const PFS_VERSION = "v3.5.5-stepfix";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
@@ -1522,7 +1522,15 @@ function createForge(node, config) {
             // seed gets a dice button instead of a slider (its range is 2^64).
             const isSeed = w.name === "seed";
             const hasRange = !isSeed && w.options && w.options.min !== undefined && w.options.max !== undefined;
-            const step = (w.options && w.options.step > 0) ? w.options.step : 1;
+            // v3.5.5-stepfix: the ComfyUI frontend stores widget options.step as the
+            // def step x10 (raw def step in options.step2) — litegraph slider legacy
+            // (settingStore: addWidget(..., {step: a*10, step2: a})). Reading
+            // options.step raw made every slider 10x coarser than designed; narrow
+            // ranges became FROZEN (adv_tp_bands [-1,4] -> step 10 -> -1 is the ONLY
+            // legal value; every native drag and every programmatic set snapped back).
+            // This was the "sliders don't budge" root cause all along.
+            const step = (w.options && w.options.step2 > 0) ? w.options.step2
+                : (w.options && w.options.step > 0) ? w.options.step / 10 : 1;
             const isInt = Number.isInteger(step);
             // -1 sentinel = "inherit the Look/strength preset" (backend _pick).
             // Show it as a readable placeholder instead of a raw -1 that looks
@@ -1629,6 +1637,7 @@ function createForge(node, config) {
                                 widget: w.name, from, to, wAfter: w.value,
                                 moves, native, fellBack: fell, endedBy, capOk, ms,
                                 rect, suites,
+                                smin: slider.min, smax: slider.max, sstep: slider.step,
                             });
                         }, 250);
                     };
