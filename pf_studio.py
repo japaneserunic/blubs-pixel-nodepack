@@ -1,4 +1,4 @@
-# VERSION: v3.7.0-spriteguard (2026-08-16) — true-pixel-art defaults + sizing guardrails
+# VERSION: v3.7.1-blockguard (2026-08-16) — Source/2 keeps intentional art grids (block>=6)
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -131,7 +131,7 @@ class PixelForgeSuperForge:
                 "images": ("IMAGE",),
                 # ================= MAIN FORGE (obvious knobs) =================
                 "size_preset": (list(_SUITE_SIZES), {"default": "Source (H3's own grid)",
-                                "tooltip": "Final sprite resolution in art pixels. Source = the exact grid H3 rendered (crispest, very fine). Source / 2 = half that grid (balanced, reads as real pixel art). Pick a fixed size only for game-ready dimensions."}),
+                                "tooltip": "Final sprite resolution in art pixels. Source = the exact grid H3 rendered (crispest, very fine). Source / 2 = half that grid when the detected grid is just H3's ~4px render texture; if the gen already drew real pixel blocks (>=6px, e.g. imitating a hi-bit ref) the Source grid is kept — halving would erase the art. Pick a fixed size only for game-ready dimensions."}),
                 "custom_width": ("INT", {"default": 64, "min": 8, "max": 2048, "step": 8}),
                 "custom_height": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 8,
                                   "tooltip": "0 = match source aspect. Custom size only."}),
@@ -333,7 +333,24 @@ class PixelForgeSuperForge:
             tw, th = custom_width, custom_height
         elif size_preset == "Source / 2 (balanced)":
             if src_grid is not None:
-                tw, th = max(8, src_grid[0] // 2), max(8, src_grid[1] // 2)
+                # v3.7.1-blockguard: halve ONLY H3's incidental VAE pseudo-
+                # grid (~4px blocks). When the gen carries INTENTIONAL pixel
+                # structure (>=6px blocks — e.g. imitating a hi-bit ref), the
+                # detected grid IS the art grid; halving halves the artwork.
+                # Measured on the Sasuke run (uid b7c4b8b23b): 78x77 grid from
+                # ~9px blocks, within-2x2 MAD 25.9/255 -> Source/2 = 39x38
+                # destroyed the hi-bit detail.
+                try:
+                    _blk = int(json.loads(ginfo).get("block", 0))
+                except Exception:
+                    _blk = 0
+                if _blk >= 6:
+                    tw, th = src_grid
+                    report.append(
+                        f"size guard: gen drew real {_blk}px art blocks — "
+                        "keeping the Source grid (halving would erase detail)")
+                else:
+                    tw, th = max(8, src_grid[0] // 2), max(8, src_grid[1] // 2)
             else:
                 tw, th = max(8, images.shape[2] // 2), max(8, images.shape[1] // 2)
         elif _SIZE_PRESETS[size_preset] < 0:
