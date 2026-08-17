@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.7.4-looktune — Hi-bit defaults retuned (measured) + effective-config report");
-const PFS_VERSION = "v3.7.4-looktune";
+console.info("[PixelForge] pf_studio v3.7.5-pixelperfect — suite canvas snaps to integer/reciprocal zoom (no resample mixel)");
+const PFS_VERSION = "v3.7.5-pixelperfect";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
@@ -2176,16 +2176,36 @@ function createForge(node, config) {
     const ctx = canvas.getContext("2d");
     const tctx = tl.getContext("2d");
 
+    // v3.7.5-pixelperfect: NEVER draw the art at a non-integer scale.
+    // With imageSmoothingEnabled=false a fractional scale nearest-resamples
+    // the sprite: art px land at N screen px here, N+1 there = the "mixel"
+    // the owner saw (sprite data is provably uniform-grid — run 9d9a1a18c8,
+    // 49/49 final frames pixel-exact crops of look, 0 off-grid runs at 4x).
+    // Integer upscale / reciprocal (1/n) downscale keeps every art px the
+    // same screen size, exactly like Aseprite's zoom.
+    function pfSnapScale(s, fitLimit) {
+        // fitLimit = hard max scale (panel fit) or 0 for manual zoom.
+        if (s >= 1) {
+            if (!fitLimit) return Math.max(1, Math.round(s));
+            const f = Math.max(1, Math.floor(s));
+            return f > fitLimit ? Math.max(1, Math.floor(fitLimit)) : f;
+        }
+        let inv = Math.max(1, Math.round(1 / s));
+        if (fitLimit && 1 / inv > fitLimit) inv = Math.max(1, Math.ceil(1 / s));
+        return 1 / inv;
+    }
+
     function viewParams(img, region) {
         // canvas sources (composited frames) expose .width/.height, not .naturalWidth
         const iw = img.naturalWidth || img.width || 1, ih = img.naturalHeight || img.height || 1;
         let scale, ox, oy;
         if (st.zoom <= 0) {
-            scale = Math.min(region.w / iw, region.h / ih) * 0.96;
+            scale = pfSnapScale(Math.min(region.w / iw, region.h / ih) * 0.96,
+                                Math.min(region.w / iw, region.h / ih));
             ox = region.x + (region.w - iw * scale) / 2;
             oy = region.y + (region.h - ih * scale) / 2;
         } else {
-            scale = st.zoom;
+            scale = pfSnapScale(st.zoom, 0);
             ox = region.x + region.w / 2 + st.panX - (iw * scale) / 2;
             oy = region.y + region.h / 2 + st.panY - (ih * scale) / 2;
         }
@@ -2373,7 +2393,13 @@ function createForge(node, config) {
             st.zoom = scale;
             st.panX = 0; st.panY = 0;
         }
-        st.zoom = Math.max(0.25, Math.min(64, st.zoom * f));
+        const prevZ = st.zoom;
+        let z = pfSnapScale(Math.max(0.25, Math.min(64, prevZ * f)), 0);
+        // v3.7.5: snapped rounding can pin small steps (1 -> 1.25 -> 1) —
+        // guarantee the zoom actually moves one integer/reciprocal step.
+        if (f > 1 && z <= prevZ) z = prevZ >= 1 ? prevZ + 1 : 1 / Math.max(1, Math.round(1 / prevZ) - 1);
+        else if (f < 1 && z >= prevZ) z = prevZ > 1 ? prevZ - 1 : 1 / (Math.round(1 / prevZ) + 1);
+        st.zoom = Math.max(0.25, Math.min(64, z));
         draw();
     }
 
