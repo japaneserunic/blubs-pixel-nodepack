@@ -1,4 +1,4 @@
-# VERSION: v3.7.3-tightband (2026-08-17) — tight-tol ladder + interior-off for the backdrop-variant key rescue
+# VERSION: v3.7.4-looktune (2026-08-17) — Hi-bit resolved defaults retuned on the real 56-frame run (no neon, no 1px sharpen, no band-flip speckle) + look report prints the effective config
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -481,24 +481,48 @@ class PixelForgeSuperForge:
         palette_json = "{}"
         if look.startswith("Hi-bit"):
             cel = look == "Hi-bit cel shading"
+            # v3.7.4-looktune: retuned on the REAL 56-frame Sasuke run (uid
+            # f208a47162 grid temps, measured not guessed). Old chain — sat
+            # 1.25 x contrast 1.10 x vibrancy 1.15 x hue 0.30, plus sharpen
+            # 0.6 as a 1px unsharp at ART res (params were designed for
+            # video-res input) — posterized to neon and sprayed band-edge
+            # speckle (2.40%). New: keep the sprite's own colors, no art-res
+            # sharpen halos, cel_contrast 1.0 so borderline px stop flipping
+            # bands per pixel. Measured: speckle 1.41%, ~29 ramp colors,
+            # gradient retention 0.82, coherent shade shapes on all frames.
+            tp_sat = _pick(adv_tp_saturation, 1.05)
+            tp_con = _pick(adv_tp_contrast, 1.0)
+            tp_shp = _pick(adv_tp_sharpen, 0.0)
+            tp_vib = _pick(adv_tp_vibrancy, 1.0)
+            tp_hue = _pick(adv_tp_hue_shift, 0.0)
+            tp_cel = _pick(adv_tp_cel_contrast, 1.0)
+            tp_bands = _pick(adv_tp_bands, 3 if cel else 1)
             images, alpha, _smask, palette_json = PixelForgeTruePixel().run(
                 images, tw, th, "area", colors,
                 _pick(adv_tp_share, 0.75),
                 _pick(adv_tp_flatten, 5.0), 2,
-                _pick(adv_tp_bands, 3 if cel else 1),
+                tp_bands,
                 _pick(adv_tp_ambient, 0.35),
                 _pick(adv_tp_shadow_thr, 0.55),
                 _pick(adv_tp_highlight_thr, 0.85),
-                _pick(adv_tp_cel_contrast, 1.25),
-                _pick(adv_tp_hue_shift, 0.30 if cel else 0.0),
-                _pick(adv_tp_vibrancy, 1.15),
+                tp_cel,
+                tp_hue,
+                tp_vib,
                 _tri(adv_tp_outline, cel),
                 dmode, dstrength, cleanup,
-                _pick(adv_tp_saturation, 1.25),
-                _pick(adv_tp_contrast, 1.10),
-                _pick(adv_tp_sharpen, 0.6),
+                tp_sat,
+                tp_con,
+                tp_shp,
                 True, 28.0, 1, "manual", 10, 0.06, True, alpha=alpha)
-            report.append(f"look: {look.lower()}")
+            # effective-config line (v3.7.4): what ACTUALLY ran is visible in
+            # the report — stale saved widget values can't hide behind the
+            # word "preset" (his saved v6 node ran Modern @ 8 colors while he
+            # thought he was testing Hi-bit cel @ 16).
+            report.append(
+                f"look: {look.lower()} @ {colors} colors "
+                f"(bands {tp_bands}, sat {tp_sat}, con {tp_con}, "
+                f"sharpen {tp_shp}, vib {tp_vib}, hue {tp_hue}, "
+                f"cel {tp_cel})")
         else:
             preset_name = {"Modern (smooth color)": "modern_hibit",
                            "Retro 16-bit": "retro_16bit",
@@ -530,7 +554,7 @@ class PixelForgeSuperForge:
                 temporal_lock=_pick(adv_q_temporal_lock, 0.0),
                 custom_palette_image=custom_palette_image,
                 alpha=alpha)
-            report.append(f"look: {look.lower()}, palette: {palette}")
+            report.append(f"look: {look.lower()} @ {use_colors} colors, palette: {palette}")
         capture("look", images, alpha, pixel_exact=True)
 
         # ---------------- stage: motion fix ----------------

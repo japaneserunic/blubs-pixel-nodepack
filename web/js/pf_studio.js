@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.7.3-tightband — tight-tol ladder for the key rescue");
-const PFS_VERSION = "v3.7.3-tightband";
+console.info("[PixelForge] pf_studio v3.7.4-looktune — Hi-bit defaults retuned (measured) + effective-config report");
+const PFS_VERSION = "v3.7.4-looktune";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
@@ -1512,17 +1512,17 @@ function createForge(node, config) {
             case "adv_q_flatten": return qNA || 0;
             case "adv_q_temporal_lock": return qNA || 0;
             case "adv_tp_bands": return tpNA || (cel ? 3 : 1);
-            case "adv_tp_hue_shift": return tpNA || (cel ? 0.3 : 0);
-            case "adv_tp_vibrancy": return tpNA || 1.15;
-            case "adv_tp_cel_contrast": return tpNA || 1.25;
+            case "adv_tp_hue_shift": return tpNA || 0;   // v3.7.4: hue 0.3 teal'd whites
+            case "adv_tp_vibrancy": return tpNA || 1;    // v3.7.4
+            case "adv_tp_cel_contrast": return tpNA || 1;   // v3.7.4: stop per-px band flips
             case "adv_tp_outline": return tpNA || (cel ? "on" : "off");
             case "adv_tp_ambient": return tpNA || 0.35;
             case "adv_tp_shadow_thr": return tpNA || 0.55;
             case "adv_tp_highlight_thr": return tpNA || 0.85;
             case "adv_tp_flatten": return tpNA || 5;
-            case "adv_tp_saturation": return tpNA || 1.25;
-            case "adv_tp_contrast": return tpNA || 1.1;
-            case "adv_tp_sharpen": return tpNA || 0.6;
+            case "adv_tp_saturation": return tpNA || 1.05;  // v3.7.4
+            case "adv_tp_contrast": return tpNA || 1;    // v3.7.4
+            case "adv_tp_sharpen": return tpNA || 0;   // v3.7.4: no 1px unsharp at art res
             case "adv_tp_share": return tpNA || 0.75;
             case "adv_motion_mode": { const m = PFS_MOTION[mf]; return m ? m[0] : "off"; }
             case "adv_motion_threshold": { const m = PFS_MOTION[mf]; return m ? m[1] : 10; }
