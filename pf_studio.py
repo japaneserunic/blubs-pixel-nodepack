@@ -1,4 +1,4 @@
-# VERSION: v3.7.1-blockguard (2026-08-16) — Source/2 keeps intentional art grids (block>=6)
+# VERSION: v3.7.2-sandblast (2026-08-17) — backdrop-variant key rescue + detail-aware Source/2
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -307,6 +307,55 @@ class PixelForgeSuperForge:
                 _tri(adv_key_temporal_alpha, True),
                 _pick(adv_key_drop_detached, 5.0))
             report.append(f"key: {key_color} ({key_strength.lower()})")
+            # v3.7.2-sandblast: letterbox / backdrop-variant rescue. H3
+            # sometimes delivers a NON-uniform backdrop (measured on run
+            # ea62126afc: green bars + white band; single-color key left the
+            # band opaque — early frames 86.8% opaque vs ~16% median). Frames
+            # whose opaque fraction dwarfs the batch median get a second
+            # flood-key pass targeting the SURVIVING border color (the band).
+            # Prototype on the real frame: 87.0% -> 12.2% opaque, enclosed
+            # white shirt untouched (flood only takes border-connected px).
+            _op = (alpha > 0.5).float().mean(dim=(1, 2)).cpu().numpy()
+            _med = float(np.median(_op))
+            if _med < 0.45:
+                _bad = [i for i in range(len(_op))
+                        if _op[i] > 0.45
+                        and _op[i] > max(2.0 * _med, _med + 0.30)]
+                _rescued = 0
+                for i in _bad:
+                    _a = alpha[i].cpu().numpy()
+                    _rgb = images[i].cpu().numpy()
+                    _sa = np.concatenate([_a[:, :4].ravel(),
+                                          _a[:, -4:].ravel()])
+                    _sr = np.concatenate([_rgb[:, :4, :].reshape(-1, 3),
+                                          _rgb[:, -4:, :].reshape(-1, 3)])
+                    _eop = _sa > 0.5  # 4px strips: the keyer's matte erode
+                    if _eop.sum() < 8:  # leaves the exact border col empty
+                        continue
+                    _band = np.median(_sr[_eop], axis=0)
+                    _hex = "#%02X%02X%02X" % tuple(
+                        int(round(v * 255)) for v in np.clip(_band, 0, 1))
+                    _, _a2 = PixelForgeChromaKey().run(
+                        images[i:i + 1], _hex,
+                        _pick(adv_key_tolerance, tol_p),
+                        _pick(adv_key_softness, 0.0),
+                        _tri(adv_key_despill, True),
+                        "flood",
+                        _pick(adv_key_shadow, shadow_p),
+                        _tri(adv_key_interior, True),
+                        _pick(adv_key_interior_tol, 0.5),
+                        _pick(adv_key_erode, 1),
+                        _tri(adv_key_rescue, True),
+                        _pick(adv_key_interior_max_area, 2.0),
+                        _tri(adv_key_temporal_alpha, True),
+                        _pick(adv_key_drop_detached, 5.0))
+                    alpha[i] = torch.minimum(alpha[i],
+                                             _a2[0].to(alpha.device))
+                    _rescued += 1
+                if _rescued:
+                    report.append(
+                        f"key rescue: re-keyed {_rescued} frame(s) onto a "
+                        "surviving border backdrop variant")
         else:
             report.append("key: skipped (alpha wired in)")
         capture("keyed", images, alpha, pixel_exact=False)
@@ -329,6 +378,7 @@ class PixelForgeSuperForge:
             meta["grid"] = {"skipped": True, "frames": 0, "shown": 0, "w": 0, "h": 0}
 
         # ---------------- resolve target size ----------------
+        _guard_kept = False
         if size_preset == "Custom size":
             tw, th = custom_width, custom_height
         elif size_preset == "Source / 2 (balanced)":
@@ -344,11 +394,42 @@ class PixelForgeSuperForge:
                     _blk = int(json.loads(ginfo).get("block", 0))
                 except Exception:
                     _blk = 0
-                if _blk >= 6:
+                # v3.7.2-sandblast: keep Source iff block >= 8 (deliberate
+                # pixel art — the VAE pseudo-grid never exceeds ~7) OR the
+                # within-2x2 MAD of grid-res opaque px > 11 (real pixel
+                # structure 14.6-25.9 vs smooth texture 2.5-6.0, measured).
+                # Block 6-7 alone is NOT proof: spurious detections happen on
+                # perfectly smooth content (verify smooth control: block 7,
+                # MAD 2.5).
+                _mad = 0.0
+                try:
+                    _mads = []
+                    for _i in _thin_indices(images.shape[0], 8):
+                        _f = (images[_i].clamp(0, 1) * 255).cpu().numpy()
+                        _h2, _w2 = (_f.shape[0] // 2 * 2,
+                                    _f.shape[1] // 2 * 2)
+                        _g = _f[:_h2, :_w2].reshape(
+                            _h2 // 2, 2, _w2 // 2, 2, 3)
+                        _m = np.abs(_g - _g.mean(axis=(1, 3),
+                                    keepdims=True)).mean(axis=(1, 3, 4))
+                        if alpha is not None:
+                            _am = (alpha[_i].cpu().numpy()[:_h2, :_w2]
+                                   .reshape(_h2 // 2, 2, _w2 // 2, 2)
+                                   .all(axis=(1, 3)))
+                            _mads.append(float(_m[_am].mean())
+                                         if _am.any() else 0.0)
+                        else:
+                            _mads.append(float(_m.mean()))
+                    _mad = float(np.median(_mads)) if _mads else 0.0
+                except Exception:
+                    _mad = 0.0
+                if _blk >= 8 or _mad > 11.0:
+                    _guard_kept = True
                     tw, th = src_grid
                     report.append(
-                        f"size guard: gen drew real {_blk}px art blocks — "
-                        "keeping the Source grid (halving would erase detail)")
+                        f"size guard: gen carries real pixel structure "
+                        f"(block {_blk}px, detail {_mad:.1f}) — keeping the "
+                        "Source grid (halving would erase detail)")
                 else:
                     tw, th = max(8, src_grid[0] // 2), max(8, src_grid[1] // 2)
             else:
@@ -365,7 +446,7 @@ class PixelForgeSuperForge:
         # pixel structure is invisible and the output reads as a downscaled
         # image, not pixel art — the owner's "blown-up 200x200" failure mode.
         _long_side = max(tw, th if th else tw)
-        if _long_side > 128:
+        if _long_side > 128 and not _guard_kept:
             report.append(
                 f"WARN size: {tw}x{th if th else 'auto'} art grid is very fine — "
                 "pixel structure won't read (blown-up-image look). "
