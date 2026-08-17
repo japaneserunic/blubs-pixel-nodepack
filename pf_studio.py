@@ -1,4 +1,4 @@
-# VERSION: v3.7.2-sandblast (2026-08-17) — backdrop-variant key rescue + detail-aware Source/2
+# VERSION: v3.7.3-tightband (2026-08-17) — tight-tol ladder + interior-off for the backdrop-variant key rescue
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -335,22 +335,42 @@ class PixelForgeSuperForge:
                     _band = np.median(_sr[_eop], axis=0)
                     _hex = "#%02X%02X%02X" % tuple(
                         int(round(v * 255)) for v in np.clip(_band, 0, 1))
-                    _, _a2 = PixelForgeChromaKey().run(
-                        images[i:i + 1], _hex,
-                        _pick(adv_key_tolerance, tol_p),
-                        _pick(adv_key_softness, 0.0),
-                        _tri(adv_key_despill, True),
-                        "flood",
-                        _pick(adv_key_shadow, shadow_p),
-                        _tri(adv_key_interior, True),
-                        _pick(adv_key_interior_tol, 0.5),
-                        _pick(adv_key_erode, 1),
-                        _tri(adv_key_rescue, True),
-                        _pick(adv_key_interior_max_area, 2.0),
-                        _tri(adv_key_temporal_alpha, True),
-                        _pick(adv_key_drop_detached, 5.0))
-                    alpha[i] = torch.minimum(alpha[i],
-                                             _a2[0].to(alpha.device))
+                    # v3.7.3-tightband: the v3.7.2 re-key ran at FULL key
+                    # tolerance with interior gaps ON. On a near-gray band
+                    # (white scene) the Lab candidacy window admits every
+                    # mid-gray, so the flood breaches the outline through
+                    # the anti-aliased edge and eats white/skin costume
+                    # pieces (measured on run aded984c73 f0-5: bright
+                    # subject px 2.5-6.3k eaten vs 9.3-15.4k kept at tight
+                    # tol; opaque-vs-tol plateaus up to ~0.16 then falls
+                    # off a cliff at 0.25). The band itself is FLAT — it
+                    # keys at a much tighter tolerance. Interior gaps are
+                    # OFF here: the rescue's job is the border-connected
+                    # band only (an enclosed white shirt tightly matches a
+                    # white band; the interior pass can't tell them apart).
+                    # Try tight first, loosen only if the band survives.
+                    _a2 = None
+                    for _ts in (0.4, 0.7, 1.0):
+                        _, _try_a = PixelForgeChromaKey().run(
+                            images[i:i + 1], _hex,
+                            _pick(adv_key_tolerance, tol_p) * _ts,
+                            _pick(adv_key_softness, 0.0),
+                            _tri(adv_key_despill, True),
+                            "flood",
+                            _pick(adv_key_shadow, shadow_p),
+                            False,
+                            _pick(adv_key_interior_tol, 0.5),
+                            _pick(adv_key_erode, 1),
+                            _tri(adv_key_rescue, True),
+                            _pick(adv_key_interior_max_area, 2.0),
+                            _tri(adv_key_temporal_alpha, True),
+                            _pick(adv_key_drop_detached, 5.0))
+                        _a2 = torch.minimum(alpha[i],
+                                            _try_a[0].to(alpha.device))
+                        if float((_a2 > 0.5).float().mean()) <= \
+                                max(1.6 * _med, _med + 0.20):
+                            break
+                    alpha[i] = _a2
                     _rescued += 1
                 if _rescued:
                     report.append(
