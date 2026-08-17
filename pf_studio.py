@@ -1,4 +1,4 @@
-# VERSION: v3.0.0-layers (2026-08-15) — force cache bust
+# VERSION: v3.7.0-spriteguard (2026-08-16) — true-pixel-art defaults + sizing guardrails
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -44,6 +44,14 @@ from .pf_easy import (_ANCHORS, _BACKGROUNDS, _CANVAS, _DITHER, _KEY_STRENGTH,
 
 _TRI = ["preset", "on", "off"]          # 3-state override for engine booleans
 _STAGE_ORDER = ["source", "keyed", "grid", "look", "motion", "final"]
+
+# Suite-only size vocab (v3.7.0): the shared Easy dict can't carry this —
+# Easy's resolver treats ANY negative sentinel as full Source. "Source / 2"
+# halves H3's true grid: an exact 2x block-reduce (crisp, no fractional
+# downsample mush) that lands in the pixel-art sweet spot (~68px for the
+# default 544 gen vs 136 at full Source).
+_SUITE_SIZES = (["Source (H3's own grid)", "Source / 2 (balanced)"] +
+                [k for k in _SIZE_PRESETS if k != "Source (H3's own grid)"])
 
 
 def _pick(v, default):
@@ -122,8 +130,8 @@ class PixelForgeSuperForge:
             "required": {
                 "images": ("IMAGE",),
                 # ================= MAIN FORGE (obvious knobs) =================
-                "size_preset": (list(_SIZE_PRESETS.keys()), {"default": "Source (H3's own grid)",
-                                "tooltip": "Final sprite resolution in art pixels. Source = keep the exact grid H3 rendered (crispest, 1:1, recommended)."}),
+                "size_preset": (list(_SUITE_SIZES), {"default": "Source (H3's own grid)",
+                                "tooltip": "Final sprite resolution in art pixels. Source = the exact grid H3 rendered (crispest, very fine). Source / 2 = half that grid (balanced, reads as real pixel art). Pick a fixed size only for game-ready dimensions."}),
                 "custom_width": ("INT", {"default": 64, "min": 8, "max": 2048, "step": 8}),
                 "custom_height": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 8,
                                   "tooltip": "0 = match source aspect. Custom size only."}),
@@ -226,7 +234,8 @@ class PixelForgeSuperForge:
                 "adv_motion_commit": ("INT", {"default": -1, "min": -1, "max": 5}),
                 "adv_motion_hold": ("INT", {"default": -1, "min": -1, "max": 8}),
                 # ============ ADVANCED: crop / loop / dedup ============
-                "adv_crop_padding": ("INT", {"default": -1, "min": -1, "max": 256}),
+                "adv_crop_padding": ("INT", {"default": -1, "min": -1, "max": 256,
+                                     "tooltip": "Margin around the sprite on the Tight canvas. -1 = auto (~10% of the sprite — large but never frame-filling)."}),
                 "adv_crop_snap": ("INT", {"default": -1, "min": -1, "max": 128,
                                   "tooltip": "Size multiple snap. -1 = preset (8)."}),
                 "adv_loop_max_error": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.01}),
@@ -322,6 +331,11 @@ class PixelForgeSuperForge:
         # ---------------- resolve target size ----------------
         if size_preset == "Custom size":
             tw, th = custom_width, custom_height
+        elif size_preset == "Source / 2 (balanced)":
+            if src_grid is not None:
+                tw, th = max(8, src_grid[0] // 2), max(8, src_grid[1] // 2)
+            else:
+                tw, th = max(8, images.shape[2] // 2), max(8, images.shape[1] // 2)
         elif _SIZE_PRESETS[size_preset] < 0:
             if src_grid is not None:
                 tw, th = src_grid
@@ -330,6 +344,19 @@ class PixelForgeSuperForge:
         else:
             tw, th = _SIZE_PRESETS[size_preset], _SIZE_PRESETS[size_preset]
         report.append(f"size: {tw}x{th if th else 'auto'}")
+        # Art-grid sanity guardrail (v3.7.0): past ~128px on the long side the
+        # pixel structure is invisible and the output reads as a downscaled
+        # image, not pixel art — the owner's "blown-up 200x200" failure mode.
+        _long_side = max(tw, th if th else tw)
+        if _long_side > 128:
+            report.append(
+                f"WARN size: {tw}x{th if th else 'auto'} art grid is very fine — "
+                "pixel structure won't read (blown-up-image look). "
+                "<=128 recommended; 'Source / 2' or Medium 64 for real pixels")
+        elif _long_side < 16:
+            report.append(
+                f"WARN size: {tw}x{th if th else 'auto'} art grid is extremely "
+                "coarse — sprite may be unreadable")
 
         # ---------------- stage: look (quantize / truepixel) ----------------
         dmode, dstrength = _DITHER[dither]
@@ -410,8 +437,26 @@ class PixelForgeSuperForge:
         # ---------------- crop & anchor ----------------
         # Suite placement dot: nudges the sprite inside a fixed canvas
         # (frontend writes placement_x/y from the dot, center-relative).
-        pad = _pick(adv_crop_padding, 2)
         snap = _pick(adv_crop_snap, 8)
+        if adv_crop_padding == -1:
+            # Proportional margin (v3.7.0): flat pad 2 made the Tight canvas
+            # frame-filling BY CONSTRUCTION — 2px of margin on any sprite =
+            # the character touches the frame = "blown-up image, not pixel
+            # art". ~10% of the sprite's long side keeps the character large
+            # but never frame-filling (pixels stay visible around it).
+            pad = 2
+            try:
+                if alpha is not None:
+                    _u = (alpha.cpu().numpy().max(axis=0) > 0.5)
+                    if _u.any():
+                        _ys, _xs = np.where(_u)
+                        pad = int(min(32, max(3, round(
+                            max(int(_xs.max()) - int(_xs.min()) + 1,
+                                int(_ys.max()) - int(_ys.min()) + 1) * 0.10))))
+            except Exception:
+                pad = 2
+        else:
+            pad = adv_crop_padding
         if canvas == "Tight (crop to sprite)":
             images, alpha, crop_info = PixelForgeAutoCrop().run(
                 images, "union", anchor, pad, snap, 0, alpha=alpha)
@@ -455,6 +500,32 @@ class PixelForgeSuperForge:
                 if alpha is not None:
                     alpha = alpha[:, sy0:sy1, sx0:sx1]
                 report.append(f"selection: {sx1 - sx0}x{sy1 - sy0} @ {sx0},{sy0}")
+
+        # Framing audit (v3.7.0): measure FINAL sprite occupancy of the
+        # canvas. The two reads that kill pixel art: frame-filling (>92% =
+        # blown-up image) and postage-stamp (<40% = sprite drowned in canvas,
+        # e.g. a fixed 200x100 canvas around a 13px character).
+        try:
+            if alpha is not None:
+                _fa = alpha.cpu().numpy()
+                _u = (_fa.max(axis=0) > 0.5)
+                if _u.any():
+                    _ys, _xs = np.where(_u)
+                    _bw = (int(_xs.max()) - int(_xs.min()) + 1) / _fa.shape[2]
+                    _bh = (int(_ys.max()) - int(_ys.min()) + 1) / _fa.shape[1]
+                    report.append(
+                        f"framing: sprite {_bw * 100:.0f}%x{_bh * 100:.0f}% of canvas")
+                    if _bw > 0.92 or _bh > 0.92:
+                        report.append(
+                            "WARN framing: sprite fills the frame — reads as a "
+                            "blown-up image, not pixel art. Raise the margin "
+                            "(adv_crop_padding) or use a smaller canvas")
+                    elif _bw < 0.40 and _bh < 0.40:
+                        report.append(
+                            "WARN framing: sprite is tiny inside its canvas — "
+                            "shrink the canvas or raise the art size")
+        except Exception:
+            pass
 
         capture("final", images, alpha, pixel_exact=True)
 

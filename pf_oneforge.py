@@ -435,12 +435,17 @@ class PixelForgeOneForge:
         # One Forge out-of-box defaults = the battle-tested config (owner's
         # known-good, verified across the 2026-08-16 sessions): square 1:1
         # 0.3MP canvas (single character fills it; ~2.5x fewer pixels to gen
-        # than 16:9 0.5MP), Hi-bit cel shading look, 16 colors. SuperForge /
-        # Easy defs stay untouched — these overrides apply to THIS node only.
+        # than 16:9 0.5MP), Hi-bit cel shading look, 16 colors.
+        # v3.7.0 adds size_preset "Source / 2 (balanced)": full Source (~136px
+        # grid on the 544 gen) is too fine to read as pixel art — half the
+        # grid is an exact 2x block-reduce that keeps pixels VISIBLE.
+        # SuperForge / Easy defs stay untouched — these overrides apply to
+        # THIS node only.
         for _k, _dv in {"gen_size": "1:1 · 0.3MP (544x544)",
                         "gen_width": 544, "gen_height": 544,
                         "look": "Hi-bit cel shading",
-                        "colors": 16}.items():
+                        "colors": 16,
+                        "size_preset": "Source / 2 (balanced)"}.items():
             _t, _meta = required[_k]
             required[_k] = (_t, {**(_meta or {}), "default": _dv})
         optional = {

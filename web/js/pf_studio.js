@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.6.1-presetview — preset controls show resolved values");
-const PFS_VERSION = "v3.6.1-presetview";
+console.info("[PixelForge] pf_studio v3.7.0-spriteguard — true-pixel-art defaults + sizing guardrails");
+const PFS_VERSION = "v3.7.0-spriteguard";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
@@ -1528,7 +1528,7 @@ function createForge(node, config) {
             case "adv_motion_threshold": { const m = PFS_MOTION[mf]; return m ? m[1] : 10; }
             case "adv_motion_commit": { const m = PFS_MOTION[mf]; return m ? m[2] : 2; }
             case "adv_motion_hold": { const m = PFS_MOTION[mf]; return m ? m[3] : 3; }
-            case "adv_crop_padding": return 2;
+            case "adv_crop_padding": return "auto~10%";   // v3.7.0: proportional margin
             case "adv_crop_snap": return 8;
             case "adv_loop_max_error": return 0.06;
             case "adv_loop_tail": return 0.5;
