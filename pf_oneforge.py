@@ -454,6 +454,12 @@ class PixelForgeOneForge:
         required.update(gen)
         required.update(forge_required)
         required.update(export)
+        # v3.8.0b: adv_ref_backdrop MUST serialize last (widget-value
+        # alignment) - a mid-list widget breaks every saved OneForge
+        # workflow (the 2026-08-18 v11 queue-validation failure).
+        _rb = required.pop("adv_ref_backdrop", None)
+        if _rb is not None:
+            required["adv_ref_backdrop"] = _rb
         # One Forge out-of-box defaults = the battle-tested config (owner's
         # known-good, verified across the 2026-08-16 sessions): square 1:1
         # 0.3MP canvas (single character fills it; ~2.5x fewer pixels to gen
