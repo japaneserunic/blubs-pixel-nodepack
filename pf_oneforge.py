@@ -39,7 +39,7 @@ from PIL import Image
 
 from .pf_easy import PixelForgeEasyExport, PixelForgeEasyPrompt, _BACKGROUNDS
 from .pf_sampler import PixelForgeH3FlatSigmas, PixelForgeH3PixelSampler
-from .pf_studio import PixelForgeSuperForge, _save_stage
+from .pf_studio import PixelForgeSuperForge, _save_stage, _REF_LOOK
 # v3.6.0-bgsync uses these for the backdrop-synced gen prompt (the edit that
 # introduced the call sites forgot this import — NameError on first Forge).
 from .pf_h3 import FPS as _H3_FPS, PixelForgeH3Prompt, clause_for_hex
@@ -205,6 +205,28 @@ def _load_drawn_ref(name, width, height, bg_hex, dx=0, dy=0):
     except Exception as e:  # never let a ref helper kill the whole gen
         log.warning("[OneForge] drawn ref load failed for %r: %s", name, e)
         return None
+
+
+def _load_ref_raw(name):
+    """Raw ref image for the Reference look (palette/backdrop source) -- NOT
+    flattened/upscaled (that is _load_drawn_ref's gen prep). Searches the
+    temp dir first (suite ref-slot uploads live there), then the input dir
+    (Load Image picks the frontend writes into drawn_ref_image).
+    Returns an IMAGE tensor [1,H,W,3], or None."""
+    try:
+        base = os.path.basename(str(name or "").strip())
+        if not base:
+            return None
+        for d in (folder_paths.get_temp_directory(),
+                  folder_paths.get_input_directory()):
+            path = os.path.join(d, base)
+            if os.path.isfile(path):
+                arr = np.asarray(Image.open(path).convert("RGB"),
+                                 dtype=np.float32) / 255.0
+                return torch.from_numpy(arr)[None,]
+    except Exception as e:  # never let a ref helper kill the forge
+        log.warning("[OneForge] raw ref load failed for %r: %s", name, e)
+    return None
 
 
 # ---------------------------------------------------------------- video ref
@@ -617,6 +639,21 @@ class PixelForgeOneForge:
             log_lines.append(f"sampled: {images.shape[0]}f")
         else:
             log_lines.append(f"generate: skipped (images wired in, {images.shape[0]}f)")
+
+        # Reference look (v3.8.0-refmatch): the armed ref slot doubles as
+        # the forge-time style source -- the raw ref image (NOT the flattened/
+        # upscaled gen prep) supplies palette + backdrop.
+        if (custom_palette_image is None and drawn_ref_image
+                and forge.get("look") == _REF_LOOK):
+            _raw = _load_ref_raw(drawn_ref_image)
+            if _raw is not None:
+                custom_palette_image = _raw
+                log_lines.append(
+                    f"ref look: {os.path.basename(drawn_ref_image)} supplies "
+                    "palette + backdrop")
+            else:
+                log_lines.append(
+                    "ref look: ref file missing in temp/input - hi-bit fallback")
 
         # ---------------- 2. forge (SuperForge engine, untouched) ----------------
         print("[OneForge] forging pixels…", flush=True)

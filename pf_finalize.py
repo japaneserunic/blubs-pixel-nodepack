@@ -872,11 +872,218 @@ class PixelForgeSegmentMask:
         return (torch.from_numpy(masks), torch.from_numpy(prev))
 
 
+# ---------------------------------------------------------------------------
+# v3.8.0-refmatch: Reference-match look -- snap the forged frames onto the
+# REFERENCE sprite's own palette + backdrop instead of a kmeans palette
+# derived from the gen. Measured on the real run 429e8cc342 (Sasuke ref):
+# the gen carries every ref color (nearest-opaque-px d<=16 for all 16 exact
+# ref colors) but the kmeans+ramp chain dropped the rare ones (magenta sash
+# d=164 off, cyan d=93 off) and re-shaded everything through derived ramps
+# (duller + shaggy band speckle). Direct snapping restores the ref's exact
+# colors AND its flat-region read -- there is no ramp shading at all.
+
+
+def _ref_quant_labels(rgb_u8, k=12, seed=0):
+    """Deterministic kmeans label map -- grid detection needs flat color
+    regions, not the ref's resampled edge blends."""
+    rng = np.random.default_rng(seed)
+    sub = rgb_u8[::4, ::4].reshape(-1, 3).astype(np.float32)
+    if len(sub) < k:
+        sub = rgb_u8.reshape(-1, 3).astype(np.float32)
+    cent = sub[rng.choice(len(sub), k, replace=False)]
+    for _ in range(40):
+        d = ((sub[:, None, :] - cent[None]) ** 2).sum(2)
+        lab = d.argmin(1)
+        nc = np.array([sub[lab == i].mean(0) if (lab == i).any() else cent[i]
+                       for i in range(k)])
+        if np.allclose(nc, cent):
+            break
+        cent = nc
+    full = rgb_u8.reshape(-1, 3).astype(np.float32)
+    d = ((full[:, None, :] - cent[None]) ** 2).sum(2)
+    return d.argmin(1).reshape(rgb_u8.shape[:2])
+
+
+def _axis_fit(lines, k, n_cls):
+    """Best (mismatch, offset) of majority block-reduce at block k over 1D
+    label rows -- the true grid's blocks are uniform, everything else isn't."""
+    best = (1e9, 0)
+    L = len(lines[0])
+    for o in range(k):
+        n = (L - o) // k
+        if n < 8:
+            continue
+        tot = cnt = 0
+        for row in lines:
+            seg = row[o:o + n * k].reshape(n, k)
+            maj = np.array([np.bincount(b, minlength=n_cls).argmax()
+                            for b in seg])
+            tot += int((seg != np.repeat(maj, k).reshape(n, k)).sum())
+            cnt += seg.size
+        m = tot / max(cnt, 1)
+        if m < best[0]:
+            best = (m, o)
+    return best
+
+
+def _ref_detect_block(ref_u8, k_max=24):
+    """The ref's integer upscale block (Sasuke PNG: 820x721 = 10px blocks ->
+    82x72 art). Halves of the true k also fit, so take the LARGEST k within
+    1.3x of the best mismatch. None = no clean grid (use the ref as-is)."""
+    lab = _ref_quant_labels(ref_u8)
+    h, w = lab.shape
+    rows = [lab[y] for y in range(0, h, 4)]
+    cols = [lab[:, x] for x in range(0, w, 4)]
+    fits = []
+    for k in range(2, k_max + 1):
+        mx, ox = _axis_fit(rows, k, 12)
+        my, oy = _axis_fit(cols, k, 12)
+        fits.append((k, (mx + my) / 2.0, ox, oy))
+    best_m = min(f[1] for f in fits)
+    if best_m > 0.08:
+        return None
+    k, m, ox, oy = max((f for f in fits if f[1] <= best_m * 1.3 + 1e-9),
+                       key=lambda f: f[0])
+    return k, ox, oy
+
+
+def _modal_reduce(ref_u8, k, ox, oy):
+    """Art-res ref: per-block modal color (exact palette recovery)."""
+    h, w = ref_u8.shape[:2]
+    n = (w - ox) // k
+    m = (h - oy) // k
+    out = np.empty((m, n, 3), np.uint8)
+    for j in range(m):
+        for i in range(n):
+            blk = ref_u8[oy + j * k:oy + (j + 1) * k,
+                         ox + i * k:ox + (i + 1) * k].reshape(-1, 3)
+            c, cnt = np.unique(blk, axis=0, return_counts=True)
+            out[j, i] = c[cnt.argmax()]
+    return out
+
+
+def _ref_palette(ref_u8, cap):
+    """(pal_rgb, bg_rgb, grid_k, art_res) -- the ref's EXACT palette via
+    modal block-reduce when an upscale grid is detected (Sasuke: 16 colors
+    exact), lab-kmeans fallback for gridless/busy refs. bg = the ref's
+    dominant color (its simple flat backdrop)."""
+    det = _ref_detect_block(ref_u8)
+    if det is not None:
+        k, ox, oy = det
+        art = _modal_reduce(ref_u8, k, ox, oy)
+    else:
+        k, art = 1, ref_u8
+    cols, cnts = np.unique(art.reshape(-1, 3), axis=0, return_counts=True)
+    order = np.argsort(-cnts)
+    cols = cols[order]
+    bg = tuple(int(v) for v in cols[0])
+    pal = [tuple(int(v) for v in c) for c in cols]
+    if len(pal) > max(64, cap * 4):
+        pal = _kmeans_palette([Image.fromarray(art)], cap, space="lab")
+    else:
+        pal = _merge_palette(pal, threshold=7.0)
+        if len(pal) > max(64, cap * 4):
+            pal = _kmeans_palette([Image.fromarray(art)], cap, space="lab")
+    return pal, bg, k, art
+
+
+class PixelForgeRefMatch:
+    """Reference-match finalize: snap grid-res frames onto a reference
+    sprite's own palette (and optionally its flat backdrop). No kmeans, no
+    shade ramps -- the ref's exact colors and flat-region read. Classification
+    runs on a 3x3-median signal + 2x region vote (the TruePixel v3.7.8
+    anti-speckle machinery), so regions consolidate instead of scattering."""
+
+    CATEGORY = "PixelForge/pixel"
+    FUNCTION = "run"
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("images", "alpha", "info_json")
+    DESCRIPTION = ("Snap frames to a reference sprite's exact palette (and "
+                   "flat backdrop). For true-pixel-art refs the palette is "
+                   "recovered exactly (integer-grid modal reduce).")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "ref_image": ("IMAGE",),
+                "colors": ("INT", {"default": 16, "min": 2, "max": 256,
+                                   "tooltip": "Palette cap for the kmeans fallback on gridless refs. True pixel-art refs use their exact colors regardless."}),
+                "despeckle": ("INT", {"default": 1, "min": 0, "max": 3}),
+                "region_vote": ("BOOLEAN", {"default": True}),
+                "backdrop": (["ref color", "transparent"], {"default": "ref color"}),
+            },
+            "optional": {"alpha": ("MASK",)},
+        }
+
+    def run(self, images, ref_image, colors=16, despeckle=1, region_vote=True,
+            backdrop="ref color", alpha=None):
+        arr = (images.clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
+        n, h, w, _ = arr.shape
+        ref_u8 = (ref_image[0].clamp(0, 1) * 255).round().to(
+            torch.uint8).cpu().numpy()
+        pal, bg, k, art = _ref_palette(ref_u8, colors)
+        pal_f = np.array(pal, dtype=np.float32)
+        pal_u8 = pal_f.astype(np.uint8)
+        n_cls = len(pal)
+        am = alpha.cpu().numpy() if alpha is not None else None
+        out = np.zeros((n, h, w, 3), dtype=np.uint8)
+        out_a = np.zeros((n, h, w), dtype=np.float32)
+        bg_u8 = np.array(bg, dtype=np.uint8)
+        for i in range(n):
+            px = arr[i].astype(np.float32)
+            # Per-pixel classification (A/B measured on run 429e8cc342 grid
+            # temps: per-pixel kept 13-20 magenta sash px vs 7-16 with a 3x3
+            # median prefilter, speckle 0.45-0.65% vs 0.20-0.28% — the
+            # region vote + despeckle below still consolidate noise, and the
+            # thin legit detail survives. The 3x3 median that TruePixel's
+            # base+band classification needs (48 classes, 9% speckle input)
+            # eats 1-2px features here for no visual gain).
+            if am is not None:
+                a = np.clip(am[min(i, am.shape[0] - 1)], 0, 1)
+                if a.shape != (h, w):
+                    a = np.asarray(Image.fromarray(
+                        (a * 255).astype(np.uint8)).resize(
+                        (w, h), Image.Resampling.NEAREST),
+                        dtype=np.float32) / 255.0
+                sm = a > 0.5
+            else:
+                sm = np.ones((h, w), dtype=bool)
+            idx = _redmean_argmin(px.reshape(-1, 3),
+                                  pal_f).reshape(h, w).astype(np.int32)
+            if region_vote and _HAS_SCIPY:
+                for _pass in range(2):
+                    idx = _region_vote(idx, None, sm, n_cls, 5)
+            if despeckle > 0:
+                idx = _despeckle(idx, despeckle, pal=pal_u8)
+            frame = pal_u8[idx.clip(0, n_cls - 1)]
+            if backdrop == "ref color":
+                frame[~sm] = bg_u8
+                out_a[i] = 1.0
+            else:
+                frame[~sm] = 0
+                out_a[i] = sm.astype(np.float32)
+            out[i] = frame
+        info = json.dumps({
+            "palette": ["#%02X%02X%02X" % tuple(c) for c in pal_u8.tolist()],
+            "palette_size": n_cls,
+            "ref_grid": int(k),
+            "backdrop": "#%02X%02X%02X" % tuple(int(v) for v in bg),
+            "backdrop_mode": backdrop,
+            "engine": "refmatch-v1",
+        })
+        return (torch.from_numpy(out.astype(np.float32) / 255.0),
+                torch.from_numpy(out_a), info)
+
+
 NODE_CLASS_MAPPINGS = {
     "PixelForgeTruePixel": PixelForgeTruePixel,
     "PixelForgeSegmentMask": PixelForgeSegmentMask,
+    "PixelForgeRefMatch": PixelForgeRefMatch,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PixelForgeTruePixel": "True Pixel Finalize (PixelForge)",
     "PixelForgeSegmentMask": "Segment Color Mask (PixelForge)",
+    "PixelForgeRefMatch": "Reference Match Finalize (PixelForge)",
 }

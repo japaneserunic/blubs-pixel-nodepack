@@ -1,6 +1,7 @@
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
 # VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
+# VERSION: v3.8.0-refmatch (2026-08-18) -- new suite look "Reference (match ref sprite)": snaps the forged frames onto the armed ref sprite's EXACT palette (integer-grid modal reduce, no kmeans, no shade ramps) + optional flat ref-color backdrop (adv_ref_backdrop). Measured on run 429e8cc342: kmeans+ramp dropped the ref's rare colors (magenta d=164 off) and Dulled everything through derived ramps; direct snapping restores exact colors + the flat chunky read. OneForge auto-feeds the armed ref slot (drawn_ref_image) when the look is selected.
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -39,7 +40,7 @@ from .pf_sprite import (PixelForgeAutoCrop, PixelForgeChromaKey,
 from .pf_grid import (PixelForgeGridRecover, _reduce_blocks,
                       _reduce_blocks_masked)
 from .pf_temporal import PixelForgeTemporalStabilize
-from .pf_finalize import PixelForgeTruePixel
+from .pf_finalize import PixelForgeTruePixel, PixelForgeRefMatch
 
 # --- shared vocabularies (kept identical to pf_easy so muscle memory transfers)
 from .pf_easy import (_ANCHORS, _BACKGROUNDS, _CANVAS, _DITHER, _KEY_STRENGTH,
@@ -55,6 +56,11 @@ _STAGE_ORDER = ["source", "keyed", "grid", "look", "motion", "final"]
 # default 544 gen vs 136 at full Source).
 _SUITE_SIZES = (["Source (H3's own grid)", "Source / 2 (balanced)"] +
                 [k for k in _SIZE_PRESETS if k != "Source (H3's own grid)"])
+
+# Suite-only look (v3.8.0-refmatch): match the armed ref sprite's own palette
+# + backdrop at forge time (see pf_finalize.PixelForgeRefMatch).
+_REF_LOOK = "Reference (match ref sprite)"
+_SUITE_LOOKS = list(_LOOKS) + [_REF_LOOK]
 
 
 def _pick(v, default):
@@ -138,7 +144,7 @@ class PixelForgeSuperForge:
                 "custom_width": ("INT", {"default": 64, "min": 8, "max": 2048, "step": 8}),
                 "custom_height": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 8,
                                   "tooltip": "0 = match source aspect. Custom size only."}),
-                "look": (_LOOKS, {"default": "Modern (smooth color)"}),
+                "look": (list(_SUITE_LOOKS), {"default": "Modern (smooth color)"}),
                 "palette": (["auto (from sprite)"] + PALETTE_NAMES + ["use custom image"],
                             {"default": "auto (from sprite)"}),
                 "colors": ("INT", {"default": 32, "min": 2, "max": 256}),
@@ -244,6 +250,8 @@ class PixelForgeSuperForge:
                 "adv_loop_max_error": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.01}),
                 "adv_loop_tail": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 0.9, "step": 0.05}),
                 "adv_dedup_threshold": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.005}),
+                "adv_ref_backdrop": (_TRI, {"default": "preset",
+                                     "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = on for the Reference look."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -271,7 +279,7 @@ class PixelForgeSuperForge:
             adv_motion_mode, adv_motion_threshold, adv_motion_commit,
             adv_motion_hold,
             adv_crop_padding, adv_crop_snap, adv_loop_max_error, adv_loop_tail,
-            adv_dedup_threshold,
+            adv_dedup_threshold, adv_ref_backdrop="preset",
             alpha=None, custom_palette_image=None,
             target_layer="new layer", layer_name="",
             placement_x=0, placement_y=0,
@@ -563,7 +571,45 @@ class PixelForgeSuperForge:
         # ---------------- stage: look (quantize / truepixel) ----------------
         dmode, dstrength = _DITHER[dither]
         palette_json = "{}"
-        if look.startswith("Hi-bit"):
+        if look == _REF_LOOK and custom_palette_image is None:
+            report.append(
+                "ref look: no ref image (arm a ref slot or wire "
+                "custom_palette_image) -- falling back to Hi-bit cel")
+            look = "Hi-bit cel shading"
+        if look == _REF_LOOK:
+            _rb = _tri(adv_ref_backdrop, True)
+            if (tw, th) != (images.shape[2], images.shape[1]):
+                _rr = []
+                for _i in range(images.shape[0]):
+                    _f = (images[_i].clamp(0, 1) * 255).round().to(
+                        torch.uint8).cpu().numpy()
+                    _rr.append(np.asarray(Image.fromarray(_f).resize(
+                        (tw, th), Image.Resampling.NEAREST)))
+                images = torch.from_numpy(
+                    np.stack(_rr).astype(np.float32) / 255.0)
+                if alpha is not None:
+                    _ra = []
+                    for _i in range(alpha.shape[0]):
+                        _f = (alpha[_i].clamp(0, 1) * 255).round().to(
+                            torch.uint8).cpu().numpy()
+                        _ra.append(np.asarray(Image.fromarray(_f).resize(
+                            (tw, th), Image.Resampling.NEAREST)))
+                    alpha = torch.from_numpy(
+                        np.stack(_ra).astype(np.float32) / 255.0)
+                report.append(f"ref look: nearest-resized to target {tw}x{th}")
+            images, alpha, palette_json = PixelForgeRefMatch().run(
+                images, custom_palette_image, colors, cleanup, True,
+                "ref color" if _rb else "transparent", alpha=alpha)
+            try:
+                _ri = json.loads(palette_json)
+                report.append(
+                    f"look: reference match @ {_ri.get('palette_size')} ref "
+                    f"colors (ref grid {_ri.get('ref_grid')}px, bg "
+                    f"{_ri.get('backdrop')}, backdrop "
+                    f"{_ri.get('backdrop_mode')})")
+            except Exception:
+                report.append("look: reference match")
+        elif look.startswith("Hi-bit"):
             cel = look == "Hi-bit cel shading"
             # v3.7.4-looktune: retuned on the REAL 56-frame Sasuke run (uid
             # f208a47162 grid temps, measured not guessed). Old chain — sat
@@ -693,6 +739,12 @@ class PixelForgeSuperForge:
                 pad = 2
         else:
             pad = adv_crop_padding
+        # v3.8.0: the Reference look can fill the backdrop with the
+        # ref's flat color (alpha fully opaque). Cropping/padding a
+        # full-bleed frame would only add a TRANSPARENT margin around the
+        # opaque backdrop -- keep the canvas exactly the frame (identity crop).
+        if look == _REF_LOOK and _tri(adv_ref_backdrop, True):
+            pad, snap = 0, 1
         if canvas == "Tight (crop to sprite)":
             images, alpha, crop_info = PixelForgeAutoCrop().run(
                 images, "union", anchor, pad, snap, 0, alpha=alpha)
@@ -742,7 +794,8 @@ class PixelForgeSuperForge:
         # blown-up image) and postage-stamp (<40% = sprite drowned in canvas,
         # e.g. a fixed 200x100 canvas around a 13px character).
         try:
-            if alpha is not None:
+            if alpha is not None and not (
+                    look == _REF_LOOK and _tri(adv_ref_backdrop, True)):
                 _fa = alpha.cpu().numpy()
                 _u = (_fa.max(axis=0) > 0.5)
                 if _u.any():
