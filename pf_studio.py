@@ -1,4 +1,4 @@
-# VERSION: v3.7.4-looktune (2026-08-17) — Hi-bit resolved defaults retuned on the real 56-frame run (no neon, no 1px sharpen, no band-flip speckle) + look report prints the effective config
+# VERSION: v3.7.6-cleanpx (2026-08-17) — Source/2 = real 2x2 majority block-reduce (no area-average mush/mixel), dark-green fringe snap (no olive/green edges), suite cel outline bool->"inner" (the preset outline never ran) (2026-08-17) — Hi-bit resolved defaults retuned on the real 56-frame run (no neon, no 1px sharpen, no band-flip speckle) + look report prints the effective config
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -34,7 +34,8 @@ from .pf_palettes import PALETTE_NAMES
 from .pf_pixelize import PixelForgeQuantize, _STYLE_PRESETS
 from .pf_sprite import (PixelForgeAutoCrop, PixelForgeChromaKey,
                         PixelForgeFrameDedup, PixelForgeLoopTrim)
-from .pf_grid import PixelForgeGridRecover
+from .pf_grid import (PixelForgeGridRecover, _reduce_blocks,
+                      _reduce_blocks_masked)
 from .pf_temporal import PixelForgeTemporalStabilize
 from .pf_finalize import PixelForgeTruePixel
 
@@ -307,6 +308,7 @@ class PixelForgeSuperForge:
                 _tri(adv_key_temporal_alpha, True),
                 _pick(adv_key_drop_detached, 5.0))
             report.append(f"key: {key_color} ({key_strength.lower()})")
+            _keyed_here = True
             # v3.7.2-sandblast: letterbox / backdrop-variant rescue. H3
             # sometimes delivers a NON-uniform backdrop (measured on run
             # ea62126afc: green bars + white band; single-color key left the
@@ -378,6 +380,7 @@ class PixelForgeSuperForge:
                         "surviving border backdrop variant")
         else:
             report.append("key: skipped (alpha wired in)")
+            _keyed_here = False
         capture("keyed", images, alpha, pixel_exact=False)
 
         # ---------------- stage: grid recover ----------------
@@ -476,6 +479,66 @@ class PixelForgeSuperForge:
                 f"WARN size: {tw}x{th if th else 'auto'} art grid is extremely "
                 "coarse — sprite may be unreadable")
 
+        # v3.7.6-fringesnap: despill residue at the silhouette survives
+        # keying + the grid reduce as DARK OLIVE px (measured on run
+        # 711da45a5a: [0,16,0]-[0,29,4], 0.3-0.8% of opaque). A majority
+        # block-reduce lets them WIN edge blocks and kmeans then grows a
+        # green base -> dark-GREEN edges (2030 green-dominant px measured
+        # vs 0 with neutralization). Snap dark green-dominant opaque px to
+        # a neutral dark; safe on green-screen keyed runs (a genuinely
+        # dark-green subject would key out with the backdrop).
+        if _keyed_here and alpha is not None:
+            _fs = (images.clamp(0, 1) * 255).round().to(
+                torch.uint8).cpu().numpy().astype(np.int16)
+            _fm = (alpha.cpu().numpy() > 0.5)
+            _fr, _fg, _fb = _fs[..., 0], _fs[..., 1], _fs[..., 2]
+            _fm = _fm & (_fs.max(-1) < 90) & (_fg > _fr + 12) & (_fg > _fb + 12)
+            if _fm.any():
+                _fs[..., 1] = np.minimum(_fg, (_fr + _fb) // 2 + 6)
+                images = torch.from_numpy(
+                    _fs.clip(0, 255).astype(np.uint8).astype(np.float32)
+                    / 255.0)
+                grid_frames = images
+                report.append(
+                    f"fringe snap: neutralized {int(_fm.sum())} dark green "
+                    "edge px")
+
+        # v3.7.6-cleanhalf: "Source / 2 (balanced)" promises an exact 2x
+        # block-reduce (size_preset tooltip) but actually let the look
+        # stage PIL-area-average the grid 2:1 — on a noisy fine grid that
+        # invents intermediate colors in EVERY mixed block (measured: 0.0%
+        # of look px equal any of their 2x2 block members; mean block span
+        # ~70/255) = the mixel/mush, and it smears the 1px black outline.
+        # Do the halve with the GridRecover engine's masked majority
+        # reduce; the look stage then runs 1:1 (no resample at all).
+        if (size_preset == "Source / 2 (balanced)" and not _guard_kept
+                and abs(images.shape[2] - tw * 2) <= 1
+                and abs(images.shape[1] - th * 2) <= 1):
+            _ha = (images.clamp(0, 1) * 255).round().to(
+                torch.uint8).cpu().numpy()
+            _hm = alpha.cpu().numpy() if alpha is not None else None
+            _hn, _hh, _hw = _ha.shape[:3]
+            _he, _hw2 = _hh // 2 * 2, _hw // 2 * 2
+            _so = np.empty((_hn, _he // 2, _hw2 // 2, 3), dtype=np.uint8)
+            _sm_a = np.empty((_hn, _he // 2, _hw2 // 2), dtype=np.float32)
+            for _i in range(_hn):
+                if _hm is not None:
+                    _so[_i] = _reduce_blocks_masked(
+                        _ha[_i, :_he, :_hw2], _hm[_i, :_he, :_hw2],
+                        2, "majority")
+                    _sm_a[_i] = (_hm[_i, :_he, :_hw2].reshape(
+                        _he // 2, 2, _hw2 // 2, 2).mean((1, 3)) > 0.5)
+                else:
+                    _so[_i] = _reduce_blocks(_ha[_i, :_he, :_hw2],
+                                             2, "majority")
+                    _sm_a[_i] = 1.0
+            images = torch.from_numpy(_so.astype(np.float32) / 255.0)
+            alpha = torch.from_numpy(_sm_a.astype(np.float32))
+            grid_frames = images
+            tw, th = _hw2 // 2, _he // 2
+            report.append(
+                "halve: exact 2x2 majority block-reduce (no resample mush)")
+
         # ---------------- stage: look (quantize / truepixel) ----------------
         dmode, dstrength = _DITHER[dither]
         palette_json = "{}"
@@ -508,7 +571,13 @@ class PixelForgeSuperForge:
                 tp_cel,
                 tp_hue,
                 tp_vib,
-                _tri(adv_tp_outline, cel),
+                # v3.7.6: TruePixel outline is a STRING combo
+                # (off/outer/inner/both) — a bool activated NEITHER ring
+                # (the cel preset outline never ran). "outer" is
+                # invisible under wired alpha (out_a = subject mask), so
+                # "inner": repaint the silhouette inner edge in the
+                # darkest ramp shade = the unbroken black outline.
+                "inner" if _tri(adv_tp_outline, cel) else "off",
                 dmode, dstrength, cleanup,
                 tp_sat,
                 tp_con,

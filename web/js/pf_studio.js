@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.7.5-pixelperfect — suite canvas snaps to integer/reciprocal zoom (no resample mixel)");
-const PFS_VERSION = "v3.7.5-pixelperfect";
+console.info("[PixelForge] pf_studio v3.7.6-cleanpx — suite canvas snaps to integer/reciprocal zoom (no resample mixel)");
+const PFS_VERSION = "v3.7.6-cleanpx";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
