@@ -1,6 +1,7 @@
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
 # VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
+# VERSION: v3.8.1 (2026-08-18) -- TWO root causes of the "wrong colors / lost detail / blobby" v11 verdict, both measured on live run 1123616ebe: (1) fringefix: the v3.7.6 fringe snap capped the green channel of the WHOLE batch (missing mask), darkening every bright saturated px one shade band before the look stage (proven pixel-exact: bug repro == live look temps, 0 diff, 56/56 frames); now masked to the dark-green px only. (2) blackguard (pf_finalize PixelForgeRefMatch): chromatic dark-navy shadow px redmean-argmin'd to pure black = shade regions voided into black blobs; black is now reserved for near-neutral/near-black px (max>=32 & chroma>=25 reassigned to nearest non-black ref color; black 22414 -> 15079 px/56f).
 # VERSION: v3.8.0-refmatch (2026-08-18) -- new suite look "Reference (match ref sprite)": snaps the forged frames onto the armed ref sprite's EXACT palette (integer-grid modal reduce, no kmeans, no shade ramps) + optional flat ref-color backdrop (adv_ref_backdrop). Measured on run 429e8cc342: kmeans+ramp dropped the ref's rare colors (magenta d=164 off) and Dulled everything through derived ramps; direct snapping restores exact colors + the flat chunky read. OneForge auto-feeds the armed ref slot (drawn_ref_image) when the look is selected.
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
@@ -523,7 +524,13 @@ class PixelForgeSuperForge:
             _fr, _fg, _fb = _fs[..., 0], _fs[..., 1], _fs[..., 2]
             _fm = _fm & (_fs.max(-1) < 90) & (_fg > _fr + 12) & (_fg > _fb + 12)
             if _fm.any():
-                _fs[..., 1] = np.minimum(_fg, (_fr + _fb) // 2 + 6)
+                # v3.8.1-fringefix: cap G ONLY on the masked dark-green px.
+                # The unmasked assignment slashed the green channel of every
+                # bright saturated px in the batch (cyan/skin/highlight ->
+                # one shade band darker; measured on live run 1123616ebe:
+                # 194 px reported, 13,501 actually mutated, 6.1% of opaque).
+                _fs[..., 1] = np.where(
+                    _fm, np.minimum(_fg, (_fr + _fb) // 2 + 6), _fg)
                 images = torch.from_numpy(
                     _fs.clip(0, 255).astype(np.uint8).astype(np.float32)
                     / 255.0)

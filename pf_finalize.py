@@ -1027,6 +1027,9 @@ class PixelForgeRefMatch:
         pal_f = np.array(pal, dtype=np.float32)
         pal_u8 = pal_f.astype(np.uint8)
         n_cls = len(pal)
+        # v3.8.1-blackguard: index of pure black in the ref palette (-1 if none)
+        _black_idx = next((i for i, c in enumerate(pal_u8.tolist())
+                           if tuple(c) == (0, 0, 0)), -1)
         am = alpha.cpu().numpy() if alpha is not None else None
         out = np.zeros((n, h, w, 3), dtype=np.uint8)
         out_a = np.zeros((n, h, w), dtype=np.float32)
@@ -1050,8 +1053,27 @@ class PixelForgeRefMatch:
                 sm = a > 0.5
             else:
                 sm = np.ones((h, w), dtype=bool)
-            idx = _redmean_argmin(px.reshape(-1, 3),
-                                  pal_f).reshape(h, w).astype(np.int32)
+            d2 = _redmean_d2(px.reshape(-1, 3), pal_f)
+            idx = d2.argmin(-1)
+            # v3.8.1-blackguard: in a true pixel-art ref, pure black is the
+            # OUTLINE color. The gen paints shadow as dark navy (lum ~25) —
+            # far closer to black in redmean than to the palette's saturated
+            # dark blue — so argmin voided whole shade regions into black
+            # blobs (live run 1123616ebe: black arm/side masses, eaten
+            # shading; black 22414 px across 56 frames). Reserve black for
+            # genuinely near-neutral / near-black px; chromatic dark px take
+            # the nearest non-black ref color. Measured: black -> 15079,
+            # cyan highlights + skin/shade bands restored.
+            if _black_idx >= 0:
+                _pxf = px.reshape(-1, 3)
+                _prot = ((idx == _black_idx)
+                         & (_pxf.max(-1) >= 32)
+                         & ((_pxf.max(-1) - _pxf.min(-1)) >= 25))
+                if _prot.any():
+                    _d2nb = d2.copy()
+                    _d2nb[:, _black_idx] = np.inf
+                    idx = np.where(_prot, _d2nb.argmin(-1), idx)
+            idx = idx.reshape(h, w).astype(np.int32)
             if region_vote and _HAS_SCIPY:
                 for _pass in range(2):
                     idx = _region_vote(idx, None, sm, n_cls, 5)
