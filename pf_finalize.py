@@ -1,5 +1,12 @@
 """True-pixel finalizer: turn H3 frames into REAL modern pixel art.
 
+VERSION v3.8.4-tintshade (2026-08-18) — RefMatch: near-black SHADING rescued
+from the outline color (fat dark-neutral components -> darkest in-family
+color; live run ad761400d2 frame 0: black 369 -> ~115 px, torso/arm masses
+read as navy/brown shading again), tinted-white highlights route to the
+lightest in-family color (no more backdrop-white holes on sleeves), and the
+region vote can no longer flip chromatic px to black.
+
 Ports the Cel Shading Studio offline engine (flattener.ts / palette.ts) into
 the PixelForge post-process, on top of the v2 quantize helpers:
 
@@ -1037,13 +1044,44 @@ def _ramp_classify(pxf, pal_f, chroma_thr=25.0, hue_win=35.0):
         if mask.any():
             idx[mask] = _redmean_d2(pxf[mask], pal_f).argmin(-1)
 
+    # v3.8.4-tintshade: "tinted whites" (near-white with a faint but real
+    # hue) are a pixel artist's COLORED highlight, not backdrop white/gray.
+    # Route chroma in [6, chroma_thr) & lum >= 200 to the LIGHTEST color of
+    # the matching ref hue ramp. Measured on live run ad761400d2 (78x78
+    # ref-density grid, exact RefMatch input): the sleeve's near-white
+    # cyan-tinted highlights (chroma ~10, lum ~242) classified to the flat
+    # backdrop white #F6F6F6 = white holes/speckle on the sprite. The ref
+    # uses pure white only for eye whites, which are truly achromatic
+    # (chroma < 6) and stay on the achromatic path.
+    tint = (xc >= 6.0) & ach & (xl >= 200.0)
+    ach = ach & ~tint
+
     if ach.any():
         if len(a_pal):
             d = np.abs(xl[ach][:, None] - pl[a_pal][None, :])
             idx[ach] = a_pal[d.argmin(-1)]
         else:
             _redmean_fallback(ach)
-    chrom = ~ach
+    if tint.any():
+        miss = tint.copy()
+        if len(c_pal):
+            dh = np.abs(xh[tint][:, None] - ph[c_pal][None, :])
+            dh = np.minimum(dh, 360.0 - dh)
+            cand = dh <= hue_win
+            has = cand.any(-1)
+            ti = np.where(tint)[0]
+            if has.any():
+                plm = np.where(cand, pl[c_pal][None, :], -np.inf)
+                idx[ti[has]] = c_pal[plm[has].argmax(-1)]
+            miss = np.zeros_like(tint)
+            miss[ti[~has]] = True
+        if miss.any():
+            if len(a_pal):
+                d = np.abs(xl[miss][:, None] - pl[a_pal][None, :])
+                idx[miss] = a_pal[d.argmin(-1)]
+            else:
+                _redmean_fallback(miss)
+    chrom = ~ach & ~tint
     if chrom.any():
         if len(c_pal):
             dh = np.abs(xh[chrom][:, None] - ph[c_pal][None, :])
@@ -1059,6 +1097,65 @@ def _ramp_classify(pxf, pal_f, chroma_thr=25.0, hue_win=35.0):
             _redmean_fallback(chrom)
     return idx
 
+
+
+def _shade_rescue(idx, pxf, sm, pal_f, bidx, bgidx, dark_lum=70.0,
+                  chroma_thr=25.0, hue_win=35.0, min_thick=2.5):
+    """Rescue SHADING the gen painted near-black from the outline color.
+
+    H3 paints shadow sides nearly black (run ad761400d2: srcfull px under
+    the live black masses measure RGB ~[7,5,7], maxch 12). Near-neutral +
+    near-black means _ramp_classify sends them to pure black by luminance —
+    but in the ref's art black is the OUTLINE/eye color and shading is the
+    darkest color of each hue ramp (#0C2CFD navy, #84530E brown). Whole
+    shadow sides voided into black blobs (live frame 0: 369 black px, only
+    ~62 of them legitimately dark-line; the owner's "black torso/arm
+    masses" verdict).
+
+    Color can't separate the two (both are near-neutral dark) — GEOMETRY
+    can: connected components of near-neutral dark px with a max thickness
+    > min_thick px are fat = shading; thin components are outline strokes
+    and keep black. Rescued px take the darkest chromatic ref color within
+    hue_win of the component's surrounding family (the modal non-black /
+    non-backdrop raw class in a 2px ring). No-op without scipy, without a
+    pure-black palette entry, or when the ring has no chromatic family.
+    """
+    if bidx < 0 or not _HAS_SCIPY:
+        return idx
+    h, w = idx.shape
+    _h, gc, gl = _rgb_to_hcl(pxf)
+    gc = gc.reshape(h, w)
+    gl = gl.reshape(h, w)
+    dark = sm & (gc < chroma_thr) & (gl < dark_lum)
+    if not dark.any():
+        return idx
+    lbl, n = _ndi.label(dark, structure=np.ones((3, 3), np.int32))
+    if n == 0:
+        return idx
+    dist = _ndi.distance_transform_edt(dark)
+    ph, pc, pl = _rgb_to_hcl(pal_f)
+    n_cls = pal_f.shape[0]
+    out = idx.copy()
+    for comp in range(1, n + 1):
+        m = lbl == comp
+        if int(m.sum()) < 3 or float(dist[m].max()) * 2.0 <= min_thick:
+            continue
+        ring = _ndi.binary_dilation(m, iterations=2) & ~m & sm
+        ring &= (idx != bidx) & (idx != bgidx)
+        if not ring.any():
+            continue
+        fam = int(np.bincount(idx[ring].ravel(), minlength=n_cls).argmax())
+        if pc[fam] < chroma_thr:
+            continue  # surrounded by gray/achromatic — no ramp to shade into
+        dh = np.abs(ph - ph[fam])
+        dh = np.minimum(dh, 360.0 - dh)
+        cand = np.where((dh <= hue_win) & (pc >= chroma_thr))[0]
+        if len(cand) == 0:
+            continue
+        darkest = int(cand[np.argmin(pl[cand])])
+        sel = m & sm & (out == bidx)
+        out[sel] = darkest
+    return out
 
 
 class PixelForgeRefMatch:
@@ -1104,6 +1201,8 @@ class PixelForgeRefMatch:
         # v3.8.1-blackguard: index of pure black in the ref palette (-1 if none)
         _black_idx = next((i for i, c in enumerate(pal_u8.tolist())
                            if tuple(c) == (0, 0, 0)), -1)
+        _bg_idx = int(np.abs(pal_u8.astype(np.int16)
+                             - np.array(bg, np.int16)).max(-1).argmin())
         am = alpha.cpu().numpy() if alpha is not None else None
         out = np.zeros((n, h, w, 3), dtype=np.uint8)
         out_a = np.zeros((n, h, w), dtype=np.float32)
@@ -1141,9 +1240,37 @@ class PixelForgeRefMatch:
             # cyan highlights + skin/shade bands restored.
             # (v3.8.3: blackguard removed - subsumed by _ramp_classify)
             idx = idx.reshape(h, w).astype(np.int32)
+            # v3.8.4-tintshade: rescue near-black SHADING from the outline
+            # color BEFORE the vote so the vote consolidates the rescued
+            # shade band with its family (fat dark-neutral components = the
+            # gen's shadow sides, not outlines; see _shade_rescue).
+            idx = _shade_rescue(idx, px.reshape(-1, 3), sm, pal_f,
+                                _black_idx, _bg_idx)
             if region_vote and _HAS_SCIPY:
+                # v3.8.4: black-spread protection — the bare 3x3 majority
+                # vote re-introduced black for CHROMATIC px surrounded by
+                # outline (measured on the exact live ad761400d2 input: 62
+                # of the 369 live black px on frame 0 were chromatic gen px
+                # flipped by the vote). A chromatic px may never flip TO
+                # black in the vote.
+                _chrom = (px.max(-1) >= 32) & ((px.max(-1) - px.min(-1)) >= 25)
                 for _pass in range(2):
-                    idx = _region_vote(idx, None, sm, n_cls, 5)
+                    _v = _region_vote(idx, None, sm, n_cls, 5)
+                    if _black_idx >= 0:
+                        _bf = ((_v == _black_idx) & (idx != _black_idx)
+                               & _chrom)
+                        _v[_bf] = idx[_bf]
+                        # v3.8.4b: black is FROZEN through the vote — a
+                        # 1-2px outline/detail stroke next to a flat region
+                        # loses the 3x3 majority (3 self votes vs 5-6 flat
+                        # neighbors) and gets eaten (the "lost interior
+                        # detail / eaten edge" verdict). TruePixel's vote
+                        # had a protect mask for exactly this; RefMatch
+                        # passed None. Isolated black noise still dies in
+                        # the despeckle pass below.
+                        _kf = (idx == _black_idx) & (_v != _black_idx)
+                        _v[_kf] = idx[_kf]
+                    idx = _v
             if despeckle > 0:
                 idx = _despeckle(idx, despeckle, pal=pal_u8)
             frame = pal_u8[idx.clip(0, n_cls - 1)]
