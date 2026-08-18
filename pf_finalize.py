@@ -1,5 +1,16 @@
 """True-pixel finalizer: turn H3 frames into REAL modern pixel art.
 
+VERSION v3.8.6-bandmatch (2026-08-18) — RefMatch: per-hue-family
+quantile band boundaries (see _hue_families / the bandmatch block in
+PixelForgeRefMatch.run). Measured on live run aaf19735ff (v15): nearest-
+lum banding lands systematically darker/dirtier than the ref (gen paints
+mid-key, the ref draws high-key): light skin 2.3% ref vs 0.7% out, tan
+3.0% vs 4.9%, bright blue 15.9% vs 27.3%. Band boundaries are now set at
+the ref's own band-usage PROPORTIONS read off the gen's batch-pooled
+luminance quantiles (pooled across all frames = no per-frame flicker).
+Achromatic path (black/gray/bg) untouched — the ref's black is 99.6%
+thin strokes (458 px, 2 fill), hair-vs-gi-shade is color-inseparable.
+
 VERSION v3.8.5-shadeboundary (2026-08-18) — RefMatch: v3.8.4's per-COMPONENT
 thickness rescue navy'd whole stroke networks (one 164px component = the
 left silhouette outline + shadow speckle; 313/323 near-black px are THIN
@@ -1161,6 +1172,36 @@ def _shade_rescue(idx, pxf, sm, pal_f, bidx, bgidx, chroma_thr=25.0,
         out[y, x] = int(np.bincount(cls.ravel(), minlength=n_cls).argmax())
     return out
 
+
+def _hue_families(pal_f, chroma_thr=25.0, hue_win=35.0):
+    """v3.8.6-bandmatch: group chromatic palette colors into hue families by
+    hue_win chaining (union-find; blues chain into cyan like the ref's own
+    ramps). Returns (families, pal_luminance)."""
+    ph, pc, pl = _rgb_to_hcl(pal_f)
+    n = pal_f.shape[0]
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    chrom = [i for i in range(n) if pc[i] >= chroma_thr]
+    for i in chrom:
+        for j in chrom:
+            d = abs(ph[i] - ph[j])
+            d = min(d, 360.0 - d)
+            if d <= hue_win:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+    fams = {}
+    for i in chrom:
+        fams.setdefault(find(i), []).append(i)
+    return list(fams.values()), pl
+
+
 class PixelForgeRefMatch:
     """Reference-match finalize: snap grid-res frames onto a reference
     sprite's own palette (and optionally its flat backdrop). No kmeans, no
@@ -1210,6 +1251,79 @@ class PixelForgeRefMatch:
         out = np.zeros((n, h, w, 3), dtype=np.uint8)
         out_a = np.zeros((n, h, w), dtype=np.float32)
         bg_u8 = np.array(bg, dtype=np.uint8)
+        # v3.8.6-bandmatch: per-family band boundaries from the ref's own
+        # band-usage proportions applied to the gen's batch-pooled luminance
+        # quantiles. The gen paints mid-key; pixel-art refs draw high-key with
+        # deliberate flat bands — nearest-lum banding therefore lands
+        # systematically DARKER than the ref (measured on live aaf19735ff:
+        # light skin 0.7% out vs 2.3% ref, tan 4.9% vs 3.0%). Pooled across
+        # all frames -> one stable boundary set, no per-frame flicker.
+        # Guards: needs scipy (HCL), a family needs >=2 bands, >=40 gen px,
+        # and the ref needs >=10 char px in >=2 of the family's bands —
+        # anything thinner falls back to nearest-lum for that family.
+        _bnd = {}
+        if _HAS_SCIPY:
+            _fams, _pl = _hue_families(pal_f)
+            _fam_of = {}
+            for _fi, _f in enumerate(_fams):
+                for _ci in _f:
+                    _fam_of[_ci] = _fi
+            if _fam_of:
+                _char = (np.abs(art.astype(np.int16)
+                                - np.array(bg, np.int16)).max(-1) > 24)
+                _refc = np.zeros(n_cls, np.float64)
+                for _ci in range(n_cls):
+                    _refc[_ci] = float((np.all(art == pal_u8[_ci], axis=-1)
+                                        & _char).sum())
+                _gl = [[] for _ in _fams]
+                for i in range(n):
+                    px = arr[i].astype(np.float32)
+                    if am is not None:
+                        _a = np.clip(am[min(i, am.shape[0] - 1)], 0, 1)
+                        if _a.shape != (h, w):
+                            _a = np.asarray(Image.fromarray(
+                                (_a * 255).astype(np.uint8)).resize(
+                                (w, h), Image.Resampling.NEAREST),
+                                dtype=np.float32) / 255.0
+                        _sm = _a > 0.5
+                    else:
+                        _sm = np.ones((h, w), dtype=bool)
+                    _idx = _ramp_classify(px.reshape(-1, 3), pal_f)
+                    _idx = _idx.reshape(h, w).astype(np.int32)
+                    _idx = _shade_rescue(_idx, px.reshape(-1, 3), _sm, pal_f,
+                                         _black_idx, _bg_idx)
+                    _, _, _xl = _rgb_to_hcl(px.reshape(-1, 3))
+                    _xl = _xl.reshape(h, w)
+                    for _ci, _fi in _fam_of.items():
+                        _m = (_idx == _ci) & _sm
+                        if _m.any():
+                            _gl[_fi].append(_xl[_m])
+                for _fi, _f in enumerate(_fams):
+                    if len(_f) < 2:
+                        continue
+                    _bands = sorted(_f, key=lambda c: _pl[c])
+                    _counts = np.array([_refc[c] for c in _bands], np.float64)
+                    _g = (np.concatenate(_gl[_fi]) if _gl[_fi]
+                          else np.array([]))
+                    if (_g.size < 40 or _counts.sum() < 10
+                            or (_counts > 0).sum() < 2):
+                        continue
+                    _qs = np.cumsum(_counts[:-1]) / _counts.sum()
+                    _bnd[_fi] = (_bands, np.quantile(_g, _qs))
+        if _bnd:
+            def _bm_remap(idx, pxf, sm):
+                _, _, _xl2 = _rgb_to_hcl(pxf)
+                _xl2 = _xl2.reshape(idx.shape)
+                _out = idx.copy()
+                for _fi, (_bands, _b) in _bnd.items():
+                    _m = np.isin(idx, _bands) & sm
+                    if not _m.any():
+                        continue
+                    _pos = np.searchsorted(_b, _xl2[_m])
+                    _out[_m] = np.array(_bands, np.int32)[_pos]
+                return _out
+        else:
+            _bm_remap = None
         for i in range(n):
             px = arr[i].astype(np.float32)
             # Per-pixel classification (A/B measured on run 429e8cc342 grid
@@ -1249,6 +1363,8 @@ class PixelForgeRefMatch:
             # gen's shadow sides, not outlines; see _shade_rescue).
             idx = _shade_rescue(idx, px.reshape(-1, 3), sm, pal_f,
                                 _black_idx, _bg_idx)
+            if _bm_remap is not None:
+                idx = _bm_remap(idx, px.reshape(-1, 3), sm)
             if region_vote and _HAS_SCIPY:
                 # v3.8.4: black-spread protection — the bare 3x3 majority
                 # vote re-introduced black for CHROMATIC px surrounded by
@@ -1290,7 +1406,8 @@ class PixelForgeRefMatch:
             "ref_grid": int(k),
             "backdrop": "#%02X%02X%02X" % tuple(int(v) for v in bg),
             "backdrop_mode": backdrop,
-            "engine": "refmatch-v2-rampclass",
+            "engine": "refmatch-v3-bandmatch",
+            "bandmatch_families": len(_bnd),
         })
         return (torch.from_numpy(out.astype(np.float32) / 255.0),
                 torch.from_numpy(out_a), info)

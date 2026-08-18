@@ -1,6 +1,8 @@
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
 # VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
+# VERSION: v3.8.7-refguard (2026-08-18) -- (1) gen<->ref compatibility guard on the Reference look: median redmean distance of opaque grid px to the ref palette > 60 falls back to Hi-bit cel instead of force-snapping a foreign gen onto the ref palette (live f62d944eee: H3 drifted to a dark ninja on the Sasuke seed; olive->black, navy->royal blue, red armband->magenta; measured med 124 vs 23 for a matching gen). (2) refdensity block from the pose-STABLE axis (character height) - the mean of w/h ratios let backflip action frames inflate the block (live 8b3edef07b: width term 14.9 vs height 8.3 -> block 12 -> 58px grid -> character 45 cells vs the ref's 64 = the 'details lost / shading not 1:1' verdict).
+# VERSION: v3.8.6-bandmatch (2026-08-18) -- RefMatch band boundaries from the ref's own band-usage proportions (pf_finalize); fixes the output landing systematically darker/dirtier than the ref (light skin 0.7% vs ref 2.3%, tan 4.9% vs 3.0% on live aaf19735ff). Batch-pooled quantiles = no flicker. Achromatic path untouched.
 # VERSION: v3.8.5-shadeboundary (2026-08-18) -- adv_ref_backdrop preset flips ON -> TRANSPARENT (owner v14 verdict: 'its not keying the bg'; pre-refmatch sprites 00085-00095 were transparent, refmatch-era baked #F6F6F6 opaque). The flat ref-color bake stays available via adv_ref_backdrop=on. Also see pf_finalize v3.8.5: boundary-vs-interior near-black rule (v3.8.4's component-thickness rescue navy'd whole outline stroke networks).
 # VERSION: v3.8.2-refdensity (2026-08-18) -- the Reference look now matches the ref sprite's character-relative block size: measured on run cc3e40f8d9 the default output was 4.06x the ref's cell count (62x137 vs 30x65 character cells), so per-cell palette classification of the soft gen speckled every shading gradient and doubled every line. The forge grid is now derived from the ref's own integer-grid geometry (block 6 -> 85x85 for the 512px Sasuke run = 1:1 chunk) via a masked majority-reduce straight from the full-res keyed frames. Source-anchored size presets only; fixed/custom sizes untouched.
 # VERSION: v3.8.1 (2026-08-18) -- TWO root causes of the "wrong colors / lost detail / blobby" v11 verdict, both measured on live run 1123616ebe: (1) fringefix: the v3.7.6 fringe snap capped the green channel of the WHOLE batch (missing mask), darkening every bright saturated px one shade band before the look stage (proven pixel-exact: bug repro == live look temps, 0 diff, 56/56 frames); now masked to the dark-green px only. (2) blackguard (pf_finalize PixelForgeRefMatch): chromatic dark-navy shadow px redmean-argmin'd to pure black = shade regions voided into black blobs; black is now reserved for near-neutral/near-black px (max>=32 & chroma>=25 reassigned to nearest non-black ref color; black 22414 -> 15079 px/56f).
@@ -591,6 +593,66 @@ class PixelForgeSuperForge:
                 "ref look: no ref image (arm a ref slot or wire "
                 "custom_palette_image) -- falling back to Hi-bit cel")
             look = "Hi-bit cel shading"
+        if look == _REF_LOOK and custom_palette_image is not None:
+            # v3.8.7-refguard: gen<->ref compatibility gate. RefMatch assumes
+            # the gen IS the ref's character (hue-window + bandmatch snapping
+            # is only meaningful then). H3 seed drift or a swapped ref slot
+            # breaks that assumption and produced silent garbage (live
+            # f62d944eee: a dark-ninja gen force-snapped into the Sasuke
+            # palette -- olive->black, navy->royal blue, red armband->
+            # magenta). Measured on the real runs: median redmean distance
+            # of opaque grid px to the ref palette = 23 for a matching gen
+            # (8b3edef07b) vs 124 for the foreign one. Gate at 60: on clear
+            # mismatch use the gen's own colors (Hi-bit cel) instead of
+            # snapping onto a foreign palette.
+            try:
+                _rg = (custom_palette_image[0].clamp(0, 1) * 255).round(
+                ).to(torch.uint8).cpu().numpy()[..., :3]
+                _pal_g, _bg_g, _k_g, _art_g = _ref_palette(_rg, colors)
+                _pg = np.array(_pal_g, np.float32)
+                _gs = []
+                for _i in range(images.shape[0]):
+                    _fr = (images[_i].clamp(0, 1) * 255).round().to(
+                        torch.uint8).cpu().numpy()
+                    if alpha is not None:
+                        _am = alpha[min(_i, alpha.shape[0] - 1)].cpu().numpy()
+                        if _am.shape != _fr.shape[:2]:
+                            _am = np.asarray(Image.fromarray(
+                                (_am * 255).astype(np.uint8)).resize(
+                                (_fr.shape[1], _fr.shape[0]),
+                                Image.Resampling.NEAREST),
+                                dtype=np.float32) / 255.0
+                        _fr = _fr[_am > 0.5]
+                    else:
+                        _fr = _fr.reshape(-1, 3)
+                    if len(_fr):
+                        _gs.append(_fr.astype(np.float32))
+                if _gs:
+                    _gp = np.concatenate(_gs)
+                    if len(_gp) > 200000:
+                        _gp = _gp[::len(_gp) // 200000 + 1]
+                    _rm = (_gp[:, :1] + _pg[None, :, 0]) / 2.0
+                    _d2 = ((2.0 + _rm / 256.0)
+                           * (_gp[:, :1] - _pg[None, :, 0]) ** 2
+                           + 4.0 * (_gp[:, 1:2] - _pg[None, :, 1]) ** 2
+                           + (2.0 + (255.0 - _rm) / 256.0)
+                           * (_gp[:, 2:3] - _pg[None, :, 2]) ** 2)
+                    _gm = float(np.median(np.sqrt(_d2.min(1))))
+                    if _gm > 60.0:
+                        report.append(
+                            f"ref look: gen does not match the ref sprite "
+                            f"(median palette distance {_gm:.0f} > 60) -- "
+                            "snapping would mangle it; using the gen's own "
+                            "colors (re-gen or swap the ref slot to match)")
+                        look = "Hi-bit cel shading"
+                    else:
+                        report.append(
+                            f"ref guard: gen matches the ref (median "
+                            f"palette distance {_gm:.0f} <= 60)")
+                else:
+                    report.append("ref guard: no opaque px -- skipped")
+            except Exception as _e:
+                report.append(f"ref guard: skipped ({_e})")
         if look == _REF_LOOK:
             _rb = _tri(adv_ref_backdrop, False)
             # v3.8.2-refdensity: match the ref sprite's character-relative
@@ -626,9 +688,14 @@ class PixelForgeSuperForge:
                         _ys, _xs = np.where(_fan[_i] > 0.5)
                         if len(_ys) < 100:
                             continue
-                        _cands.append(0.5 * (
-                            (_xs.max() - _xs.min() + 1) / _cbw
-                            + (_ys.max() - _ys.min() + 1) / _cbh))
+                        # v3.8.7: match the ref's block size on the
+                        # pose-STABLE axis (character height). The mean of
+                        # the w/h ratios let wide ACTION frames inflate the
+                        # block (live 8b3edef07b: width term 14.9 vs height
+                        # 8.3 -> block 12 -> 58px grid -> character 45 cells
+                        # vs the ref's 64 = "lost details / not 1:1").
+                        _cands.append(
+                            (_ys.max() - _ys.min() + 1) / _cbh)
                     if not _cands:
                         raise ValueError("no opaque frames")
                     _blk = max(3, min(24, int(round(float(np.median(_cands))))))
@@ -700,7 +767,8 @@ class PixelForgeSuperForge:
                     f"look: reference match @ {_ri.get('palette_size')} ref "
                     f"colors (ref grid {_ri.get('ref_grid')}px, bg "
                     f"{_ri.get('backdrop')}, backdrop "
-                    f"{_ri.get('backdrop_mode')})")
+                    f"{_ri.get('backdrop_mode')}, bandmatch "
+                    f"{_ri.get('bandmatch_families')} fam)")
             except Exception:
                 report.append("look: reference match")
         elif look.startswith("Hi-bit"):
