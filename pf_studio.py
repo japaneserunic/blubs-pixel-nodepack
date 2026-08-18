@@ -1,6 +1,7 @@
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
 # VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
+# VERSION: v3.8.5-shadeboundary (2026-08-18) -- adv_ref_backdrop preset flips ON -> TRANSPARENT (owner v14 verdict: 'its not keying the bg'; pre-refmatch sprites 00085-00095 were transparent, refmatch-era baked #F6F6F6 opaque). The flat ref-color bake stays available via adv_ref_backdrop=on. Also see pf_finalize v3.8.5: boundary-vs-interior near-black rule (v3.8.4's component-thickness rescue navy'd whole outline stroke networks).
 # VERSION: v3.8.2-refdensity (2026-08-18) -- the Reference look now matches the ref sprite's character-relative block size: measured on run cc3e40f8d9 the default output was 4.06x the ref's cell count (62x137 vs 30x65 character cells), so per-cell palette classification of the soft gen speckled every shading gradient and doubled every line. The forge grid is now derived from the ref's own integer-grid geometry (block 6 -> 85x85 for the 512px Sasuke run = 1:1 chunk) via a masked majority-reduce straight from the full-res keyed frames. Source-anchored size presets only; fixed/custom sizes untouched.
 # VERSION: v3.8.1 (2026-08-18) -- TWO root causes of the "wrong colors / lost detail / blobby" v11 verdict, both measured on live run 1123616ebe: (1) fringefix: the v3.7.6 fringe snap capped the green channel of the WHOLE batch (missing mask), darkening every bright saturated px one shade band before the look stage (proven pixel-exact: bug repro == live look temps, 0 diff, 56/56 frames); now masked to the dark-green px only. (2) blackguard (pf_finalize PixelForgeRefMatch): chromatic dark-navy shadow px redmean-argmin'd to pure black = shade regions voided into black blobs; black is now reserved for near-neutral/near-black px (max>=32 & chroma>=25 reassigned to nearest non-black ref color; black 22414 -> 15079 px/56f).
 # VERSION: v3.8.0-refmatch (2026-08-18) -- new suite look "Reference (match ref sprite)": snaps the forged frames onto the armed ref sprite's EXACT palette (integer-grid modal reduce, no kmeans, no shade ramps) + optional flat ref-color backdrop (adv_ref_backdrop). Measured on run 429e8cc342: kmeans+ramp dropped the ref's rare colors (magenta d=164 off) and Dulled everything through derived ramps; direct snapping restores exact colors + the flat chunky read. OneForge auto-feeds the armed ref slot (drawn_ref_image) when the look is selected.
@@ -256,7 +257,7 @@ class PixelForgeSuperForge:
                 "adv_loop_tail": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 0.9, "step": 0.05}),
                 "adv_dedup_threshold": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.005}),
                 "adv_ref_backdrop": (_TRI, {"default": "preset",
-                                     "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = on for the Reference look."}),
+                                     "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = transparent (keyed bg, the pre-refmatch behavior); set on to bake the flat ref-color backdrop."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -591,7 +592,7 @@ class PixelForgeSuperForge:
                 "custom_palette_image) -- falling back to Hi-bit cel")
             look = "Hi-bit cel shading"
         if look == _REF_LOOK:
-            _rb = _tri(adv_ref_backdrop, True)
+            _rb = _tri(adv_ref_backdrop, False)
             # v3.8.2-refdensity: match the ref sprite's character-relative
             # block size. Measured on run cc3e40f8d9: ref character 30x65
             # blocks (1,130 cells) vs our 62x137 (4,591) = 4.06x cells /
@@ -836,7 +837,7 @@ class PixelForgeSuperForge:
         # ref's flat color (alpha fully opaque). Cropping/padding a
         # full-bleed frame would only add a TRANSPARENT margin around the
         # opaque backdrop -- keep the canvas exactly the frame (identity crop).
-        if look == _REF_LOOK and _tri(adv_ref_backdrop, True):
+        if look == _REF_LOOK and _tri(adv_ref_backdrop, False):
             pad, snap = 0, 1
         if canvas == "Tight (crop to sprite)":
             images, alpha, crop_info = PixelForgeAutoCrop().run(
@@ -888,7 +889,7 @@ class PixelForgeSuperForge:
         # e.g. a fixed 200x100 canvas around a 13px character).
         try:
             if alpha is not None and not (
-                    look == _REF_LOOK and _tri(adv_ref_backdrop, True)):
+                    look == _REF_LOOK and _tri(adv_ref_backdrop, False)):
                 _fa = alpha.cpu().numpy()
                 _u = (_fa.max(axis=0) > 0.5)
                 if _u.any():

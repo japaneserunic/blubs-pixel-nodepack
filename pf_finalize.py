@@ -1,11 +1,18 @@
 """True-pixel finalizer: turn H3 frames into REAL modern pixel art.
 
-VERSION v3.8.4-tintshade (2026-08-18) — RefMatch: near-black SHADING rescued
-from the outline color (fat dark-neutral components -> darkest in-family
-color; live run ad761400d2 frame 0: black 369 -> ~115 px, torso/arm masses
-read as navy/brown shading again), tinted-white highlights route to the
-lightest in-family color (no more backdrop-white holes on sleeves), and the
-region vote can no longer flip chromatic px to black.
+VERSION v3.8.5-shadeboundary (2026-08-18) — RefMatch: v3.8.4's per-COMPONENT
+thickness rescue navy'd whole stroke networks (one 164px component = the
+left silhouette outline + shadow speckle; 313/323 near-black px are THIN
+pure-black strokes, lum 1-7) = outlines eaten, legs merged into flat
+saturated blue (owner: "over saturated, even more details lost"). New rule:
+a near-black px with a LIT (lum>=70) or transparent 3x3 neighbor is an
+OUTLINE and stays black; only px fully embedded in dark chromatic shadow
+fill consolidate into the local shade color (modal chromatic class in 5x5).
+Frame 0: black 369(v13)/125(v14) -> 305, navy 227/482 -> 252 — the back leg
+reads as a navy fill framed in black, outlines/shoe detail intact. Tinted-
+white highlight routing + the chromatic/black-frozen vote from v3.8.4/4b
+are unchanged. adv_ref_backdrop preset is now TRANSPARENT (pf_studio) —
+pre-refmatch sprites were transparent; the opaque #F6F6F6 bake is opt-in.
 
 Ports the Cel Shading Studio offline engine (flattener.ts / palette.ts) into
 the PixelForge post-process, on top of the v2 quantize helpers:
@@ -1099,26 +1106,29 @@ def _ramp_classify(pxf, pal_f, chroma_thr=25.0, hue_win=35.0):
 
 
 
-def _shade_rescue(idx, pxf, sm, pal_f, bidx, bgidx, dark_lum=70.0,
-                  chroma_thr=25.0, hue_win=35.0, min_thick=2.5):
-    """Rescue SHADING the gen painted near-black from the outline color.
+def _shade_rescue(idx, pxf, sm, pal_f, bidx, bgidx, chroma_thr=25.0,
+                  dark_lum=70.0, lit_lum=70.0):
+    """Boundary-vs-interior near-black rule (v3.8.5, supersedes the v3.8.4
+    per-component thickness rescue).
 
-    H3 paints shadow sides nearly black (run ad761400d2: srcfull px under
-    the live black masses measure RGB ~[7,5,7], maxch 12). Near-neutral +
-    near-black means _ramp_classify sends them to pure black by luminance —
-    but in the ref's art black is the OUTLINE/eye color and shading is the
-    darkest color of each hue ramp (#0C2CFD navy, #84530E brown). Whole
-    shadow sides voided into black blobs (live frame 0: 369 black px, only
-    ~62 of them legitimately dark-line; the owner's "black torso/arm
-    masses" verdict).
+    The gen paints outlines AND shadow-speckle in the same near-neutral
+    near-black (~RGB[3,2,2], lum 1-7) — color can't separate them, and
+    component-level thickness can't either (one stroke NETWORK can span the
+    silhouette + a shadow region; measured on ad761400d2 frame 0: a single
+    164px component covered the whole left side, 313/323 dark px thin).
+    Per-pixel geometry can:
 
-    Color can't separate the two (both are near-neutral dark) — GEOMETRY
-    can: connected components of near-neutral dark px with a max thickness
-    > min_thick px are fat = shading; thin components are outline strokes
-    and keep black. Rescued px take the darkest chromatic ref color within
-    hue_win of the component's surrounding family (the modal non-black /
-    non-backdrop raw class in a 2px ring). No-op without scipy, without a
-    pure-black palette entry, or when the ring has no chromatic family.
+      - a dark achromatic px with a LIT (lum >= lit_lum) or transparent
+        3x3 neighbor sits on a region boundary = OUTLINE -> keeps black
+        (silhouettes, form-separating strokes, eye/face detail);
+      - a dark achromatic px fully embedded in dark chromatic shadow fill
+        is interior speckle -> takes the modal class of the chromatic
+        (non-black, non-backdrop) px in its 5x5 = consolidates the shadow
+        into a solid shade region framed by the black outline that the
+        boundary rule just preserved (ref grammar).
+
+    No-op without scipy, without a pure-black palette entry, or when an
+    interior px has no chromatic neighbors (isolated genuine black detail).
     """
     if bidx < 0 or not _HAS_SCIPY:
         return idx
@@ -1129,34 +1139,27 @@ def _shade_rescue(idx, pxf, sm, pal_f, bidx, bgidx, dark_lum=70.0,
     dark = sm & (gc < chroma_thr) & (gl < dark_lum)
     if not dark.any():
         return idx
-    lbl, n = _ndi.label(dark, structure=np.ones((3, 3), np.int32))
-    if n == 0:
+    lit = sm & (gl >= lit_lum)
+    near_lit = _ndi.maximum_filter(lit.astype(np.uint8), size=3) > 0
+    near_bg = _ndi.maximum_filter((~sm).astype(np.uint8), size=3) > 0
+    interior = dark & ~near_lit & ~near_bg
+    if not interior.any():
         return idx
-    dist = _ndi.distance_transform_edt(dark)
-    ph, pc, pl = _rgb_to_hcl(pal_f)
-    n_cls = pal_f.shape[0]
+    chrom_field = sm & (gc >= chroma_thr) & (idx != bidx) & (idx != bgidx)
     out = idx.copy()
-    for comp in range(1, n + 1):
-        m = lbl == comp
-        if int(m.sum()) < 3 or float(dist[m].max()) * 2.0 <= min_thick:
+    n_cls = pal_f.shape[0]
+    ys, xs = np.where(interior)
+    for y, x in zip(ys.tolist(), xs.tolist()):
+        if out[y, x] != bidx:
             continue
-        ring = _ndi.binary_dilation(m, iterations=2) & ~m & sm
-        ring &= (idx != bidx) & (idx != bgidx)
-        if not ring.any():
+        y0, y1 = max(0, y - 2), min(h, y + 3)
+        x0, x1 = max(0, x - 2), min(w, x + 3)
+        nb = chrom_field[y0:y1, x0:x1]
+        if not nb.any():
             continue
-        fam = int(np.bincount(idx[ring].ravel(), minlength=n_cls).argmax())
-        if pc[fam] < chroma_thr:
-            continue  # surrounded by gray/achromatic — no ramp to shade into
-        dh = np.abs(ph - ph[fam])
-        dh = np.minimum(dh, 360.0 - dh)
-        cand = np.where((dh <= hue_win) & (pc >= chroma_thr))[0]
-        if len(cand) == 0:
-            continue
-        darkest = int(cand[np.argmin(pl[cand])])
-        sel = m & sm & (out == bidx)
-        out[sel] = darkest
+        cls = idx[y0:y1, x0:x1][nb]
+        out[y, x] = int(np.bincount(cls.ravel(), minlength=n_cls).argmax())
     return out
-
 
 class PixelForgeRefMatch:
     """Reference-match finalize: snap grid-res frames onto a reference
