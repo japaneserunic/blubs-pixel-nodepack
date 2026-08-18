@@ -1,4 +1,6 @@
-# VERSION: v3.7.6-cleanpx (2026-08-17) — Source/2 = real 2x2 majority block-reduce (no area-average mush/mixel), dark-green fringe snap (no olive/green edges), suite cel outline bool->"inner" (the preset outline never ran) (2026-08-17) — Hi-bit resolved defaults retuned on the real 56-frame run (no neon, no 1px sharpen, no band-flip speckle) + look report prints the effective config
+# VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
+# VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
+# VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
 """PixelForge Super Forge — the all-in-one workspace suite node.
 
 One node, whole pipeline, with a full in-node studio UI (canvas, timeline,
@@ -226,7 +228,7 @@ class PixelForgeSuperForge:
                 "adv_tp_contrast": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 3.0, "step": 0.05}),
                 "adv_tp_sharpen": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 2.0, "step": 0.1}),
                 "adv_tp_share": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.05,
-                                 "tooltip": "Subject palette share. -1 = preset (0.75)."}),
+                                 "tooltip": "Subject palette share. -1 = preset (1.0 — wired alpha means the invisible backdrop gets no budget; standalone TruePixel default stays 0.75)."}),
                 # ============ ADVANCED: motion fix ============
                 "adv_motion_mode": (["preset", "despike", "despike_matte", "movelock",
                                      "minrun", "median3_inner", "lockdown",
@@ -287,6 +289,18 @@ class PixelForgeSuperForge:
 
         # ---------------- stage: source ----------------
         capture("source", images, alpha, pixel_exact=False)
+        try:
+            _f0 = (images[0].clamp(0, 1) * 255).round().to(
+                torch.uint8).cpu().numpy()
+            if alpha is not None:
+                _a0 = (alpha[0].clamp(0, 1).cpu().numpy() * 255).round(
+                    ).astype(np.uint8)
+                _f0 = np.dstack([_f0, _a0])
+            Image.fromarray(_f0).save(os.path.join(
+                folder_paths.get_temp_directory(),
+                f"pfs_{uid}_srcfull_000.png"))
+        except Exception:
+            pass
         report.append(f"source: {images.shape[0]}f {images.shape[2]}x{images.shape[1]}")
 
         # ---------------- stage: keyed (full video res) ----------------
@@ -391,7 +405,14 @@ class PixelForgeSuperForge:
                 images, adv_grid_mode, adv_grid_block, adv_grid_max_block,
                 adv_grid_reduce, False, alpha=alpha)
             src_grid = (gw, gh)
-            report.append(f"grid: {gw}x{gh}")
+            try:
+                _gi = json.loads(ginfo)
+                report.append(
+                    f"grid: {gw}x{gh} (block {_gi.get('block')} @ "
+                    f"{tuple(_gi.get('offset', [0, 0]))}"
+                    f"{'' if _gi.get('auto_detected') else ', manual'})")
+            except Exception:
+                report.append(f"grid: {gw}x{gh}")
         else:
             report.append("grid: off")
         grid_frames = images
@@ -563,7 +584,7 @@ class PixelForgeSuperForge:
             images, alpha, _smask, palette_json = PixelForgeTruePixel().run(
                 images, tw, th, "area", colors,
                 _pick(adv_tp_share, 0.75),
-                _pick(adv_tp_flatten, 5.0), 2,
+                _pick(adv_tp_flatten, 0.0), 2,
                 tp_bands,
                 _pick(adv_tp_ambient, 0.35),
                 _pick(adv_tp_shadow_thr, 0.55),
@@ -573,11 +594,15 @@ class PixelForgeSuperForge:
                 tp_vib,
                 # v3.7.6: TruePixel outline is a STRING combo
                 # (off/outer/inner/both) — a bool activated NEITHER ring
-                # (the cel preset outline never ran). "outer" is
-                # invisible under wired alpha (out_a = subject mask), so
-                # "inner": repaint the silhouette inner edge in the
-                # darkest ramp shade = the unbroken black outline.
-                "inner" if _tri(adv_tp_outline, cel) else "off",
+                # (the cel preset outline never ran).
+                # v3.7.9-truecolors: default OFF. "inner" repaints the whole
+                # silhouette inner ring near-black — on a small art grid that
+                # ring is ~9% of the sprite (thin limbs become mostly black,
+                # reads as eaten outline + holes; measured on the real v9
+                # run: 700 near-black px vs 200 with it off, mean|d| vs grid
+                # 58 -> 25.8). H3 already draws its own outline at gen time;
+                # adv_tp_outline = "on" forces the ring back if wanted.
+                "inner" if _tri(adv_tp_outline, False) else "off",
                 dmode, dstrength, cleanup,
                 tp_sat,
                 tp_con,
@@ -591,7 +616,7 @@ class PixelForgeSuperForge:
                 f"look: {look.lower()} @ {colors} colors "
                 f"(bands {tp_bands}, sat {tp_sat}, con {tp_con}, "
                 f"sharpen {tp_shp}, vib {tp_vib}, hue {tp_hue}, "
-                f"cel {tp_cel})")
+                f"cel {tp_cel}, outline {tp_outline}, regionvote)")
         else:
             preset_name = {"Modern (smooth color)": "modern_hibit",
                            "Retro 16-bit": "retro_16bit",

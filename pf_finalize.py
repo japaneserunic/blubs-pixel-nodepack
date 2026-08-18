@@ -78,6 +78,47 @@ def _redmean_argmin(px, pal, chunk=65536):
     return out
 
 
+def _dark_line_mask(src_rgb_u8):
+    """Near-black px forming THIN CONNECTED structures (hand-drawn outline,
+    dark line details). Isolated dark specks (0-1 dark neighbors) are NOT
+    protected — the region vote dissolves them into their surround; fat
+    shadow-blob interiors (7-8 dark neighbors) are NOT protected either —
+    the vote unifies their base color. Lines (2-6 dark neighbors) are."""
+    dark = src_rgb_u8.max(-1) < 60
+    if not _HAS_SCIPY:
+        return dark
+    cnt = _ndi.convolve(dark.astype(np.int32), np.ones((3, 3), np.int32),
+                        mode="constant", cval=0) - dark.astype(np.int32)
+    return dark & (cnt >= 2) & (cnt <= 6)
+
+
+def _region_vote(idx, protect, sm, n_classes, thresh=5):
+    """3x3 one-hot majority vote on a class-index map (base*B+band).
+
+    Per-pixel redmean argmin on noisy grid-res input flips base colors and
+    cel bands pixel-by-pixel (measured on run 6b4d97642d: 95.5% of grid-res
+    px have no same-color neighbor; look stage output carried ~9.3% isolated
+    speckle px = the 'deepfried' crunch + dirty interior dark specks). Only
+    subject px vote and only subject px get reassigned; protected px (thin
+    dark lines — the outline) keep their class; a class must win >=thresh
+    of the 9 votes to reassign (weak majorities keep the original px, which
+    protects thin legit detail like the 2px sash).
+    """
+    h, w = idx.shape
+    votes = np.zeros((n_classes, h, w), dtype=np.float32)
+    for c in range(n_classes):
+        votes[c] = _ndi.uniform_filter(((idx == c) & sm).astype(np.float32),
+                                       size=3, mode="nearest")
+    win = votes.argmax(0)
+    winv = votes.max(0) * 9.0
+    re = sm & (win != idx) & (winv >= float(thresh))
+    if protect is not None:
+        re &= ~protect
+    out = idx.copy()
+    out[re] = win[re].astype(out.dtype)
+    return out
+
+
 def _rgb_to_hsv(rgb):
     """rgb (...,3) float 0-255 -> hsv (...,3), h in [0,1), s/v in [0,1]."""
     c = rgb / 255.0
@@ -437,6 +478,15 @@ class PixelForgeTruePixel:
                 "shade_smooth": ("BOOLEAN", {"default": True,
                                              "tooltip": "3x3 median on the shade-ratio map before banding: shade regions "
                                                         "become solid shapes instead of speckled mixes. Big anti-shimmer win."}),
+                # --- v3.7.8 widgets appended (positional compat) ---
+                "region_vote": ("BOOLEAN", {"default": True,
+                                            "tooltip": "Spatial coherence: 3x3 majority vote over the final "
+                                                       "base+band class per pixel. Kills per-pixel color flips "
+                                                       "(deepfried speckle) on noisy grid-res input. Thin dark "
+                                                       "lines (the outline) are protected."}),
+                "region_vote_thresh": ("INT", {"default": 5, "min": 3, "max": 9,
+                                               "tooltip": "Votes (of 9) a class needs to reassign a pixel. "
+                                                          "Higher = more conservative (keeps more original detail)."}),
             },
             "optional": {
                 "alpha": ("MASK", {"tooltip": "Wire Sprite Chroma Key's alpha here — takes priority over auto_subject."}),
@@ -452,7 +502,7 @@ class PixelForgeTruePixel:
             dither_strength, despeckle, saturation, contrast, sharpen,
             auto_subject, bg_tolerance, upscale_factor, pixel_grid="auto",
             grid_max_block=10, band_hysteresis=0.06, shade_smooth=True,
-            alpha=None):
+            region_vote=True, region_vote_thresh=5, alpha=None):
         frames = _tensor_to_pil_list(images)
         orig_w, orig_h = frames[0].size
         n = len(frames)
@@ -547,8 +597,17 @@ class PixelForgeTruePixel:
 
         # 5. palette: subject gets its own budget, backdrop the rest
         any_bg = any((~sm).any() for sm in small_subject)
-        k_sub = max(2, int(round(colors * subject_palette_share)))
-        k_bg = max(2, colors - k_sub) if any_bg else 0
+        # v3.7.9-truecolors: when alpha is WIRED the backdrop is invisible in
+        # the output (out_a = subject mask), and its premultiplied-black
+        # samples cluster into pure-black bases that win dark subject px in
+        # the redmean argmin (dark shading -> nearest "black" base -> ratio
+        # clipped -> rendered BLACK). Give the subject the full budget.
+        if alpha is not None:
+            k_sub = colors
+            k_bg = 0
+        else:
+            k_sub = max(2, int(round(colors * subject_palette_share)))
+            k_bg = max(2, colors - k_sub) if any_bg else 0
         sub_masks = list(small_subject)
         pal_sub = _kmeans_palette(small, k_sub, space="lab", masks=sub_masks)
         sub_samples = _sample_pixels(small, masks=sub_masks)
@@ -592,12 +651,36 @@ class PixelForgeTruePixel:
             mid2 = shadow_threshold + (highlight_threshold - shadow_threshold) * 0.66
             bounds = [shadow_threshold, mid1, mid2]
         prev_band = None
+        dark_lines = []
         for i, f in enumerate(small):
             px = np.asarray(f, dtype=np.float32)
-            flat = px.reshape(-1, 3)
+            # v3.7.8: classify base color + band from a spatially SMOOTHED
+            # copy. Per-pixel redmean argmin on noisy grid-res input
+            # (measured 95%% of px with no same-color neighbor on run
+            # 6b4d97642d) scatters dark base classes through mid-tone
+            # regions = the deepfried speck. Transparent px are filled from
+            # the nearest opaque px first so the median doesn't drag
+            # matte-black into the silhouette edge. The outline is NOT
+            # trusted to this classification — thin dark lines are snapped
+            # back deterministically in step 8.
+            if region_vote and _HAS_SCIPY:
+                _sm0 = small_subject[i]
+                if (~_sm0).any():
+                    _dt, _ind = _ndi.distance_transform_edt(
+                        ~_sm0, return_indices=True)
+                    px_f = px[tuple(_ind)]
+                else:
+                    px_f = px
+                px_c = _ndi.median_filter(px_f, size=(3, 3, 1))
+                dark_lines.append(
+                    _dark_line_mask(np.asarray(f, dtype=np.uint8)) & _sm0)
+            else:
+                px_c = px
+                dark_lines.append(None)
+            flat = px_c.reshape(-1, 3)
             base_idx = _redmean_argmin(flat, pal).reshape(th, tw)
             base_col = pal[base_idx]                          # (th,tw,3)
-            ratio = _luminance(px) / np.maximum(_luminance(base_col), 1.0)
+            ratio = _luminance(px_c) / np.maximum(_luminance(base_col), 1.0)
             ratio = 1.0 + (ratio - 1.0) * cel_contrast
             if shade_smooth and _HAS_SCIPY:
                 # median-filter the shade map: solid shade shapes instead of
@@ -620,8 +703,28 @@ class PixelForgeTruePixel:
             out_small.append((band, base_idx))
             idx_maps.append(idx)
 
+        # 7b. v3.7.8-regionvote: consolidate per-pixel base/band decisions
+        # into regions. Without this, noisy grid-res input (95%% of px with
+        # no same-color neighbor measured on run 6b4d97642d) quantizes into
+        # ~9%% isolated speckle px = deepfried crunch + interior dark specks
+        # that read as a dirty/eaten outline.
+        if region_vote and _HAS_SCIPY and B >= 1:
+            n_cls = K * B
+            for i in range(n):
+                for _pass in range(2):
+                    idx_maps[i] = _region_vote(idx_maps[i], None,
+                                               small_subject[i], n_cls,
+                                               region_vote_thresh)
+                new_idx = idx_maps[i]
+                out_small[i] = (new_idx % B, new_idx // B)
+
         # 8. outline pass (silhouette) in darkest ramp shade, deeper still
         outline_idx_offset = K * B
+        # v3.7.8: ONE global outline color (the darkest base's shade) — the
+        # hand-drawn look is a single unbroken near-black line, not a
+        # per-base patchwork of navy/brown/black (owner: "coloring is off,
+        # parts of the black outline eaten").
+        darkest_base = int(_luminance(pal).argmin()) if K else 0
         if outline != "off" and _HAS_SCIPY:
             for i in range(n):
                 idx = idx_maps[i]
@@ -642,7 +745,15 @@ class PixelForgeTruePixel:
                 if outline in ("inner", "both"):
                     inner = sm & ~ero
                     if inner.any():
-                        idx[inner] = outline_idx_offset + base_idx[inner]
+                        idx[inner] = outline_idx_offset + darkest_base
+                # v3.7.8: snap the hand-drawn thin dark lines (interior
+                # outline strokes the silhouette ring can't reach) to the
+                # same global outline color. Isolated dark specks and fat
+                # shadow blobs are NOT in this mask — they already
+                # dissolved into their regions in step 7/7b.
+                if region_vote and i < len(dark_lines) \
+                        and dark_lines[i] is not None:
+                    idx[dark_lines[i]] = outline_idx_offset + darkest_base
 
         # 9. final palette table (ramp + outline shades), despeckle, compose
         outline_cols = np.clip(ramp[:, 0, :] * 0.55, 0, 255)  # deeper than shadow
