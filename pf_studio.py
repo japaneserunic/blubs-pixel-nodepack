@@ -583,7 +583,7 @@ class PixelForgeSuperForge:
             tp_bands = _pick(adv_tp_bands, 3 if cel else 1)
             images, alpha, _smask, palette_json = PixelForgeTruePixel().run(
                 images, tw, th, "area", colors,
-                _pick(adv_tp_share, 0.75),
+                _pick(adv_tp_share, 1.0),
                 _pick(adv_tp_flatten, 0.0), 2,
                 tp_bands,
                 _pick(adv_tp_ambient, 0.35),
@@ -616,7 +616,7 @@ class PixelForgeSuperForge:
                 f"look: {look.lower()} @ {colors} colors "
                 f"(bands {tp_bands}, sat {tp_sat}, con {tp_con}, "
                 f"sharpen {tp_shp}, vib {tp_vib}, hue {tp_hue}, "
-                f"cel {tp_cel}, outline {tp_outline}, regionvote)")
+                f"cel {tp_cel}, outline {"inner" if _tri(adv_tp_outline, False) else "off"}, regionvote)")
         else:
             preset_name = {"Modern (smooth color)": "modern_hibit",
                            "Retro 16-bit": "retro_16bit",
