@@ -1,6 +1,7 @@
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
 # VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
+# VERSION: v3.8.2-refdensity (2026-08-18) -- the Reference look now matches the ref sprite's character-relative block size: measured on run cc3e40f8d9 the default output was 4.06x the ref's cell count (62x137 vs 30x65 character cells), so per-cell palette classification of the soft gen speckled every shading gradient and doubled every line. The forge grid is now derived from the ref's own integer-grid geometry (block 6 -> 85x85 for the 512px Sasuke run = 1:1 chunk) via a masked majority-reduce straight from the full-res keyed frames. Source-anchored size presets only; fixed/custom sizes untouched.
 # VERSION: v3.8.1 (2026-08-18) -- TWO root causes of the "wrong colors / lost detail / blobby" v11 verdict, both measured on live run 1123616ebe: (1) fringefix: the v3.7.6 fringe snap capped the green channel of the WHOLE batch (missing mask), darkening every bright saturated px one shade band before the look stage (proven pixel-exact: bug repro == live look temps, 0 diff, 56/56 frames); now masked to the dark-green px only. (2) blackguard (pf_finalize PixelForgeRefMatch): chromatic dark-navy shadow px redmean-argmin'd to pure black = shade regions voided into black blobs; black is now reserved for near-neutral/near-black px (max>=32 & chroma>=25 reassigned to nearest non-black ref color; black 22414 -> 15079 px/56f).
 # VERSION: v3.8.0-refmatch (2026-08-18) -- new suite look "Reference (match ref sprite)": snaps the forged frames onto the armed ref sprite's EXACT palette (integer-grid modal reduce, no kmeans, no shade ramps) + optional flat ref-color backdrop (adv_ref_backdrop). Measured on run 429e8cc342: kmeans+ramp dropped the ref's rare colors (magenta d=164 off) and Dulled everything through derived ramps; direct snapping restores exact colors + the flat chunky read. OneForge auto-feeds the armed ref slot (drawn_ref_image) when the look is selected.
 """PixelForge Super Forge — the all-in-one workspace suite node.
@@ -41,7 +42,7 @@ from .pf_sprite import (PixelForgeAutoCrop, PixelForgeChromaKey,
 from .pf_grid import (PixelForgeGridRecover, _reduce_blocks,
                       _reduce_blocks_masked)
 from .pf_temporal import PixelForgeTemporalStabilize
-from .pf_finalize import PixelForgeTruePixel, PixelForgeRefMatch
+from .pf_finalize import PixelForgeTruePixel, PixelForgeRefMatch, _ref_palette
 
 # --- shared vocabularies (kept identical to pf_easy so muscle memory transfers)
 from .pf_easy import (_ANCHORS, _BACKGROUNDS, _CANVAS, _DITHER, _KEY_STRENGTH,
@@ -61,6 +62,9 @@ _SUITE_SIZES = (["Source (H3's own grid)", "Source / 2 (balanced)"] +
 # Suite-only look (v3.8.0-refmatch): match the armed ref sprite's own palette
 # + backdrop at forge time (see pf_finalize.PixelForgeRefMatch).
 _REF_LOOK = "Reference (match ref sprite)"
+# v3.8.2: ref-density auto-sizing only for Source-anchored presets;
+# an explicit fixed/custom size always wins.
+_SRC_SIZE_MODES = ("Source (H3's own grid)", "Source / 2 (balanced)")
 _SUITE_LOOKS = list(_LOOKS) + [_REF_LOOK]
 
 
@@ -405,6 +409,9 @@ class PixelForgeSuperForge:
             report.append("key: skipped (alpha wired in)")
             _keyed_here = False
         capture("keyed", images, alpha, pixel_exact=False)
+        # v3.8.2-refdensity: full-res keyed stash for the ref-density
+        # reduce (the look branch reduces straight from here).
+        _keyed_full = (images, alpha)
 
         # ---------------- stage: grid recover ----------------
         src_grid = None
@@ -585,7 +592,86 @@ class PixelForgeSuperForge:
             look = "Hi-bit cel shading"
         if look == _REF_LOOK:
             _rb = _tri(adv_ref_backdrop, True)
-            if (tw, th) != (images.shape[2], images.shape[1]):
+            # v3.8.2-refdensity: match the ref sprite's character-relative
+            # block size. Measured on run cc3e40f8d9: ref character 30x65
+            # blocks (1,130 cells) vs our 62x137 (4,591) = 4.06x cells /
+            # 2.07x linear — per-cell classification of a soft gen at 2x the
+            # ref's density speckles every shading gradient and doubles every
+            # line. Derive the forge grid from the REF's own geometry and
+            # masked-majority-reduce the full-res keyed frames straight to it.
+            _rdm = None
+            if (custom_palette_image is not None
+                    and _keyed_full[0] is not None
+                    and size_preset in _SRC_SIZE_MODES):
+                try:
+                    _ru = (custom_palette_image[0].clamp(0, 1) * 255).round(
+                    ).to(torch.uint8).cpu().numpy()[..., :3]
+                    _pal_r, _bg_r, _k_r, _art_r = _ref_palette(_ru, colors)
+                    if _k_r is None or _k_r <= 1:
+                        raise ValueError("ref has no integer grid")
+                    _char = (np.abs(_art_r.astype(np.int16)
+                                    - np.array(_bg_r, np.int16)).max(-1) > 24)
+                    if _char.sum() < 25:
+                        raise ValueError("ref character not found")
+                    _cys, _cxs = np.where(_char)
+                    _cbw = int(_cxs.max() - _cxs.min() + 1)
+                    _cbh = int(_cys.max() - _cys.min() + 1)
+                    _fi, _fa = _keyed_full
+                    if _fa is None:
+                        raise ValueError("no alpha for character bbox")
+                    _fan = _fa.cpu().numpy()
+                    _cands = []
+                    for _i in range(_fan.shape[0]):
+                        _ys, _xs = np.where(_fan[_i] > 0.5)
+                        if len(_ys) < 100:
+                            continue
+                        _cands.append(0.5 * (
+                            (_xs.max() - _xs.min() + 1) / _cbw
+                            + (_ys.max() - _ys.min() + 1) / _cbh))
+                    if not _cands:
+                        raise ValueError("no opaque frames")
+                    _blk = max(3, min(24, int(round(float(np.median(_cands))))))
+                    _tw2, _th2 = (_fi.shape[2] // _blk, _fi.shape[1] // _blk)
+                    if not (16 <= _tw2 <= 256 and 16 <= _th2 <= 256):
+                        raise ValueError(f"bad target {_tw2}x{_th2}")
+                    _rdm = (_blk, _tw2, _th2, _cbw, _cbh)
+                except Exception as _e:
+                    report.append(f"ref density: skipped ({_e})")
+            if _rdm is not None:
+                _blk, tw, th, _cbw, _cbh = _rdm
+                _fi, _fa = _keyed_full
+                _ha = (_fi.clamp(0, 1) * 255).round().to(
+                    torch.uint8).cpu().numpy()
+                _hm = _fa.cpu().numpy()
+                if _keyed_here:
+                    # same dark-green fringe neutralization as the grid path
+                    _fs2 = _ha.astype(np.int16)
+                    _fm2 = ((_hm > 0.5) & (_fs2.max(-1) < 90)
+                            & (_fs2[..., 1] > _fs2[..., 0] + 12)
+                            & (_fs2[..., 1] > _fs2[..., 2] + 12))
+                    if _fm2.any():
+                        _fs2[..., 1] = np.where(
+                            _fm2, np.minimum(
+                                _fs2[..., 1],
+                                (_fs2[..., 0] + _fs2[..., 2]) // 2 + 6),
+                            _fs2[..., 1])
+                        _ha = _fs2.clip(0, 255).astype(np.uint8)
+                _he, _hw2 = th * _blk, tw * _blk
+                _so = np.empty((_ha.shape[0], th, tw, 3), dtype=np.uint8)
+                _sa = np.empty((_ha.shape[0], th, tw), dtype=np.float32)
+                for _i in range(_ha.shape[0]):
+                    _so[_i] = _reduce_blocks_masked(
+                        _ha[_i, :_he, :_hw2], _hm[_i, :_he, :_hw2],
+                        _blk, "majority")
+                    _sa[_i] = (_hm[_i, :_he, :_hw2].reshape(
+                        th, _blk, tw, _blk).mean((1, 3)) > 0.5)
+                images = torch.from_numpy(_so.astype(np.float32) / 255.0)
+                alpha = torch.from_numpy(_sa)
+                grid_frames = images
+                report.append(
+                    f"ref density: block {_blk}px -> {tw}x{th} grid (ref "
+                    f"character {_cbw}x{_cbh} blocks = 1:1 chunk)")
+            elif (tw, th) != (images.shape[2], images.shape[1]):
                 _rr = []
                 for _i in range(images.shape[0]):
                     _f = (images[_i].clamp(0, 1) * 255).round().to(

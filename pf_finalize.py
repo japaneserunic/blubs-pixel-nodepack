@@ -987,6 +987,80 @@ def _ref_palette(ref_u8, cap):
     return pal, bg, k, art
 
 
+def _rgb_to_hcl(c):
+    """(N,3) float RGB -> (hue deg, chroma, luminance). Hexcone hue; hue is
+    0 where chroma == 0 (callers mask achromatic entries)."""
+    c = c.astype(np.float32)
+    r, g, b = c[..., 0], c[..., 1], c[..., 2]
+    mx = c.max(-1)
+    mn = c.min(-1)
+    ch = mx - mn
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    h = np.zeros_like(mx)
+    m = ch > 1e-6
+    chs = np.where(m, ch, 1.0)  # achromatic rows are masked below anyway
+    mr = m & (mx == r)
+    mg = m & (mx == g) & ~mr
+    mb = m & ~mr & ~mg
+    h[mr] = (60.0 * ((g - b) / chs))[mr] % 360.0
+    h[mg] = (60.0 * ((b - r) / chs) + 120.0)[mg]
+    h[mb] = (60.0 * ((r - g) / chs) + 240.0)[mb]
+    return h, ch, lum
+
+
+def _ramp_classify(pxf, pal_f, chroma_thr=25.0, hue_win=35.0):
+    """Snap px to the palette by the ref's RAMP STRUCTURE: hue family first,
+    luminance band within the family.
+
+    Why: plain redmean argmin lets a dark navy shadow px jump hue families
+    (navy -> brown #84530E or pure black) because redmean underweights hue.
+    Measured on run cc3e40f8d9 (v3.8.2, 73x73 ref-density grid): pants
+    shading snapped to BROWN speckle, hair cyan highlights eaten. A pixel
+    artist shades WITHIN a hue ramp; so does this classifier:
+      - chromatic px -> nearest-hue ramp (all ref colors within hue_win of
+        the px hue, chaining ramps like blues+cyan), band = nearest
+        luminance inside the ramp;
+      - achromatic px (chroma < chroma_thr) -> nearest-luminance achromatic
+        ref color (black / gray / flat bg);
+      - degenerate palettes (no chromatic or no achromatic ref colors) fall
+        back to plain redmean argmin for that subset.
+    Subsumes the v3.8.1 blackguard: chromatic px can never reach black.
+    """
+    ph, pc, pl = _rgb_to_hcl(pal_f)
+    xh, xc, xl = _rgb_to_hcl(pxf)
+    idx = np.zeros(pxf.shape[0], np.int32)
+    a_pal = np.where(pc < chroma_thr)[0]
+    c_pal = np.where(pc >= chroma_thr)[0]
+    ach = xc < chroma_thr
+
+    def _redmean_fallback(mask):
+        if mask.any():
+            idx[mask] = _redmean_d2(pxf[mask], pal_f).argmin(-1)
+
+    if ach.any():
+        if len(a_pal):
+            d = np.abs(xl[ach][:, None] - pl[a_pal][None, :])
+            idx[ach] = a_pal[d.argmin(-1)]
+        else:
+            _redmean_fallback(ach)
+    chrom = ~ach
+    if chrom.any():
+        if len(c_pal):
+            dh = np.abs(xh[chrom][:, None] - ph[c_pal][None, :])
+            dh = np.minimum(dh, 360.0 - dh)
+            cand = dh <= hue_win
+            none = ~cand.any(-1)
+            if none.any():
+                cand[np.where(none)[0], dh[none].argmin(-1)] = True
+            dl = np.abs(xl[chrom][:, None] - pl[c_pal][None, :])
+            dl[~cand] = np.inf
+            idx[chrom] = c_pal[dl.argmin(-1)]
+        else:
+            _redmean_fallback(chrom)
+    return idx
+
+
+
 class PixelForgeRefMatch:
     """Reference-match finalize: snap grid-res frames onto a reference
     sprite's own palette (and optionally its flat backdrop). No kmeans, no
@@ -1053,8 +1127,9 @@ class PixelForgeRefMatch:
                 sm = a > 0.5
             else:
                 sm = np.ones((h, w), dtype=bool)
-            d2 = _redmean_d2(px.reshape(-1, 3), pal_f)
-            idx = d2.argmin(-1)
+            # v3.8.3-rampclass: hue-ramp + luminance-band classification
+            # (subsumes the v3.8.1 blackguard; see _ramp_classify docstring).
+            idx = _ramp_classify(px.reshape(-1, 3), pal_f)
             # v3.8.1-blackguard: in a true pixel-art ref, pure black is the
             # OUTLINE color. The gen paints shadow as dark navy (lum ~25) —
             # far closer to black in redmean than to the palette's saturated
@@ -1064,15 +1139,7 @@ class PixelForgeRefMatch:
             # genuinely near-neutral / near-black px; chromatic dark px take
             # the nearest non-black ref color. Measured: black -> 15079,
             # cyan highlights + skin/shade bands restored.
-            if _black_idx >= 0:
-                _pxf = px.reshape(-1, 3)
-                _prot = ((idx == _black_idx)
-                         & (_pxf.max(-1) >= 32)
-                         & ((_pxf.max(-1) - _pxf.min(-1)) >= 25))
-                if _prot.any():
-                    _d2nb = d2.copy()
-                    _d2nb[:, _black_idx] = np.inf
-                    idx = np.where(_prot, _d2nb.argmin(-1), idx)
+            # (v3.8.3: blackguard removed - subsumed by _ramp_classify)
             idx = idx.reshape(h, w).astype(np.int32)
             if region_vote and _HAS_SCIPY:
                 for _pass in range(2):
@@ -1093,7 +1160,7 @@ class PixelForgeRefMatch:
             "ref_grid": int(k),
             "backdrop": "#%02X%02X%02X" % tuple(int(v) for v in bg),
             "backdrop_mode": backdrop,
-            "engine": "refmatch-v1",
+            "engine": "refmatch-v2-rampclass",
         })
         return (torch.from_numpy(out.astype(np.float32) / 255.0),
                 torch.from_numpy(out_a), info)
