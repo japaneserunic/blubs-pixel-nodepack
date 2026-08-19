@@ -461,6 +461,14 @@ class PixelForgeOneForge:
         _rb = required.pop("adv_ref_backdrop", None)
         if _rb is not None:
             required["adv_ref_backdrop"] = _rb
+        # v3.10.0-gennative: adv_ref_look_mode serializes AFTER
+        # adv_ref_backdrop (same tail-alignment rule) -- v21
+        # 119-value workflows still align (missing trailing value
+        # = default = Gen-native). Flows to SuperForge.run via
+        # **forge.
+        _rlm = required.pop("adv_ref_look_mode", None)
+        if _rlm is not None:
+            required["adv_ref_look_mode"] = _rlm
         # One Forge out-of-box defaults = the battle-tested config (owner's
         # known-good, verified across the 2026-08-16 sessions): square 1:1
         # 0.3MP canvas (single character fills it; ~2.5x fewer pixels to gen

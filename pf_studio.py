@@ -1,3 +1,4 @@
+# VERSION: v3.10.0-gennative (2026-08-19) -- new tail widget adv_ref_look_mode (after adv_ref_backdrop): "Gen-native (1:1 with the H3 gen)" (DEFAULT) keeps the guard-kept Source grid and quantizes the palette from the gen itself via the Hi-bit/TruePixel engine -- refdensity's 1:1-with-ref halving (live 1bac01576b: size guard kept 176, refdensity forced 88, 99-100% ref palette, -67% edges vs the H3 source = "detailing way off from the H3 output") and RefMatch's ref-palette snap are SKIPPED. "Reference look (legacy ref snap)" = byte-identical pre-v3.10.0 behavior. pf_oneforge tail re-order (adv_ref_backdrop, adv_ref_look_mode) keeps v21 119-value workflows aligned (missing trailing value = default = Gen-native).
 # VERSION: v3.9.0-guardquorum (2026-08-19) -- the pooled dual-read ref guard false-tripped on live 6b7e1105f3 (Sasuke + a giant lavender sleeping bag: pooled core 27.2% / median 95.7 > 75 -> silent Hi-bit fallback at the guard-kept 176x176 Source grid = "density way too high, colors in wrong areas"). Now ALSO a per-frame quorum: pass when the pooled read passes OR >= 1/3 of frames individually pass (measured on all 9 preserved runs: matching quorum 46-100%, foreign f62d944eee/0e9d79c09e 0%). Also (pf_oneforge): v3.9.0-turbosteps clamps steps >8 -> 4 when a turbo LoRA is armed (288.8s -> ~100s generate).
 # VERSION: v3.8.8-guardcore+phases (2026-08-18) -- (1) the v3.8.7 median-only ref guard false-tripped on MATCHING gens with a big foreign prop (live e49f434bfa/0d79b30fd6: Sasuke + giant cake = median 62-63 > 60 -> silent Hi-bit fallback). Now dual-read: core-within-30 >= 27% AND median <= 75 (measured on all 7 preserved runs: matching core 32-43% / median 39-63, foreign core 1-23% / median 86-130). (2) phase self-report: every pipeline section emits pf_studio_phase + a console line, the node shows a live phase strip at its top, and section durations land in the forge report.
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
@@ -73,6 +74,10 @@ _SUITE_SIZES = (["Source (H3's own grid)", "Source / 2 (balanced)"] +
 # Suite-only look (v3.8.0-refmatch): match the armed ref sprite's own palette
 # + backdrop at forge time (see pf_finalize.PixelForgeRefMatch).
 _REF_LOOK = "Reference (match ref sprite)"
+# v3.10.0-gennative: adv_ref_look_mode choices (see VERSION note).
+_REF_LOOK_MODE_GEN = "Gen-native (1:1 with the H3 gen)"
+_REF_LOOK_MODE_LEGACY = "Reference look (legacy ref snap)"
+_REF_LOOK_MODES = [_REF_LOOK_MODE_GEN, _REF_LOOK_MODE_LEGACY]
 # v3.8.2: ref-density auto-sizing only for Source-anchored presets;
 # an explicit fixed/custom size always wins.
 _SRC_SIZE_MODES = ("Source (H3's own grid)", "Source / 2 (balanced)")
@@ -268,6 +273,8 @@ class PixelForgeSuperForge:
                 "adv_dedup_threshold": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.005}),
                 "adv_ref_backdrop": (_TRI, {"default": "preset",
                                      "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = transparent (keyed bg, the pre-refmatch behavior); set on to bake the flat ref-color backdrop."}),
+                "adv_ref_look_mode": (list(_REF_LOOK_MODES), {"default": _REF_LOOK_MODE_GEN,
+                                     "tooltip": "Reference look mode. Gen-native (default): keep the guard-kept Source grid and quantize the palette from the gen itself (Hi-bit engine) -- no refdensity halving, no ref-palette snap; the output stays 1:1 with the H3 gen. Reference look (legacy): the pre-v3.10.0 ref snap (refdensity 1:1-with-ref grid + RefMatch palette snap)."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -297,6 +304,7 @@ class PixelForgeSuperForge:
             adv_motion_hold,
             adv_crop_padding, adv_crop_snap, adv_loop_max_error, adv_loop_tail,
             adv_dedup_threshold, adv_ref_backdrop="preset",
+            adv_ref_look_mode=_REF_LOOK_MODE_GEN,
             alpha=None, custom_palette_image=None,
             target_layer="new layer", layer_name="",
             placement_x=0, placement_y=0,
@@ -624,13 +632,29 @@ class PixelForgeSuperForge:
                 "halve: exact 2x2 majority block-reduce (no resample mush)")
 
         # ---------------- stage: look (quantize / truepixel) ----------------
-        _mark("look")
+        _mark("look:gen-native" if (look == _REF_LOOK
+                                    and adv_ref_look_mode == _REF_LOOK_MODE_GEN)
+              else "look")
         dmode, dstrength = _DITHER[dither]
         palette_json = "{}"
         if look == _REF_LOOK and custom_palette_image is None:
             report.append(
                 "ref look: no ref image (arm a ref slot or wire "
                 "custom_palette_image) -- falling back to Hi-bit cel")
+            look = "Hi-bit cel shading"
+        # v3.10.0-gennative: default mode keeps the gen 1:1 -- the
+        # guard-kept Source grid stands (no refdensity halving) and
+        # the palette comes from the gen itself via the Hi-bit
+        # engine (no RefMatch snap). Measured on live 1bac01576b:
+        # guard kept 176, refdensity forced 88, 99-100% ref palette,
+        # -67% edges vs the H3 source = "detailing way off from the
+        # H3 output". Legacy mode = the pre-v3.10.0 ref snap.
+        if look == _REF_LOOK and adv_ref_look_mode == _REF_LOOK_MODE_GEN:
+            report.append(
+                "ref look mode: gen-native (1:1 with the H3 gen) -- "
+                "refdensity + RefMatch skipped; palette quantized from the "
+                "gen @ the guard-kept grid (adv_ref_look_mode = legacy "
+                "restores the ref snap)")
             look = "Hi-bit cel shading"
         if look == _REF_LOOK and custom_palette_image is not None:
             # v3.8.7-refguard: gen<->ref compatibility gate. RefMatch assumes
