@@ -1,3 +1,4 @@
+# VERSION: v3.8.8-guardcore+phases (2026-08-18) -- (1) the v3.8.7 median-only ref guard false-tripped on MATCHING gens with a big foreign prop (live e49f434bfa/0d79b30fd6: Sasuke + giant cake = median 62-63 > 60 -> silent Hi-bit fallback). Now dual-read: core-within-30 >= 27% AND median <= 75 (measured on all 7 preserved runs: matching core 32-43% / median 39-63, foreign core 1-23% / median 86-130). (2) phase self-report: every pipeline section emits pf_studio_phase + a console line, the node shows a live phase strip at its top, and section durations land in the forge report.
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
 # VERSION: v3.7.7-pixelpure (2026-08-17) — Hi-bit cel flatten 5.0->0.0 (bilateral at art-grid res blurred clean pixels into mixel mush, the non-Hi-bit looks already knew: "flatten at art-res eats outlines"), TruePixel inner outline preserves existing near-black px (was repainting hand-drawn black outlines with base-color shadow shades = navy outlines on blue hair)
@@ -37,6 +38,11 @@ import torch
 from PIL import Image
 
 import folder_paths
+
+try:
+    from server import PromptServer
+except Exception:  # offline verify harness: no ComfyUI server module
+    PromptServer = None
 
 from .pf_palettes import PALETTE_NAMES
 from .pf_pixelize import PixelForgeQuantize, _STYLE_PRESETS
@@ -265,6 +271,7 @@ class PixelForgeSuperForge:
                 "alpha": ("MASK",),
                 "custom_palette_image": ("IMAGE",),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     # ------------------------------------------------------------------ run
@@ -291,11 +298,36 @@ class PixelForgeSuperForge:
             alpha=None, custom_palette_image=None,
             target_layer="new layer", layer_name="",
             placement_x=0, placement_y=0,
-            selection_w=0, selection_h=0, selection_x=0, selection_y=0):
+            selection_w=0, selection_h=0, selection_x=0, selection_y=0,
+            unique_id=None, phase_prefix=None):
 
         report = []
         uid = uuid.uuid4().hex[:10]
         stages, meta = {}, {}
+
+        # v3.8.8: phase self-report -- every pipeline section announces
+        # itself (console + pf_studio_phase event for the in-node top strip)
+        # and section durations land in the forge report, so a slow phase is
+        # visible live instead of after the fact.
+        import time as _time
+        _ph = {"cur": "", "t": _time.perf_counter()}
+        _phase_log = list(phase_prefix) if phase_prefix else []
+
+        def _mark(label):
+            _now = _time.perf_counter()
+            if _ph["cur"]:
+                _phase_log.append(f"{_ph['cur']} {_now - _ph['t']:.1f}s")
+            _ph["cur"], _ph["t"] = label, _now
+            print(f"[PixelForge {uid}] phase: {label}"
+                  + (f" (prev {_phase_log[-1]})" if _phase_log else ""))
+            try:
+                if PromptServer is not None and unique_id is not None:
+                    PromptServer.instance.send_sync("pf_studio_phase", {
+                        "node": str(unique_id), "phase": label,
+                        "trail": list(_phase_log),
+                        "reset": label == "source" and not phase_prefix})
+            except Exception:
+                pass
 
         def capture(tag, imgs, a, pixel_exact):
             refs, m = _save_stage(tag, uid, imgs, a, preview_max_frames,
@@ -304,6 +336,7 @@ class PixelForgeSuperForge:
             meta[tag] = m
 
         # ---------------- stage: source ----------------
+        _mark("source")
         capture("source", images, alpha, pixel_exact=False)
         try:
             _f0 = (images[0].clamp(0, 1) * 255).round().to(
@@ -320,6 +353,7 @@ class PixelForgeSuperForge:
         report.append(f"source: {images.shape[0]}f {images.shape[2]}x{images.shape[1]}")
 
         # ---------------- stage: keyed (full video res) ----------------
+        _mark("keying")
         if alpha is None:
             key_color = custom_bg_hex if background == "custom hex" else _BACKGROUNDS[background]
             tol_p, shadow_p = _KEY_STRENGTH[key_strength]
@@ -417,6 +451,7 @@ class PixelForgeSuperForge:
         _keyed_full = (images, alpha)
 
         # ---------------- stage: grid recover ----------------
+        _mark("grid")
         src_grid = None
         grid_frames = images
         if sharpen_grid:
@@ -441,6 +476,7 @@ class PixelForgeSuperForge:
             meta["grid"] = {"skipped": True, "frames": 0, "shown": 0, "w": 0, "h": 0}
 
         # ---------------- resolve target size ----------------
+        _mark("size")
         _guard_kept = False
         if size_preset == "Custom size":
             tw, th = custom_width, custom_height
@@ -586,6 +622,7 @@ class PixelForgeSuperForge:
                 "halve: exact 2x2 majority block-reduce (no resample mush)")
 
         # ---------------- stage: look (quantize / truepixel) ----------------
+        _mark("look")
         dmode, dstrength = _DITHER[dither]
         palette_json = "{}"
         if look == _REF_LOOK and custom_palette_image is None:
@@ -637,18 +674,33 @@ class PixelForgeSuperForge:
                            + 4.0 * (_gp[:, 1:2] - _pg[None, :, 1]) ** 2
                            + (2.0 + (255.0 - _rm) / 256.0)
                            * (_gp[:, 2:3] - _pg[None, :, 2]) ** 2)
-                    _gm = float(np.median(np.sqrt(_d2.min(1))))
-                    if _gm > 60.0:
+                    _dmin = np.sqrt(_d2.min(1))
+                    _gm = float(np.median(_dmin))
+                    _f30 = float((_dmin < 30.0).mean() * 100.0)
+                    # v3.8.8-guardcore: the median alone false-trips on a
+                    # MATCHING gen carrying a big foreign prop (live
+                    # e49f434bfa / 0d79b30fd6: Sasuke + a giant cake =
+                    # median 62-63 > 60 -> silent Hi-bit fallback on a
+                    # perfect gen). Measured on all 7 preserved runs:
+                    # core-within-30 = 32-43% matching vs 1-23% foreign
+                    # (gate 27); median = 39-63 matching vs 86-130 foreign
+                    # (gate 75). Pass only when BOTH reads say matching --
+                    # a white-heavy foreign character keeps a big core but
+                    # a high median, a prop-heavy matching gen keeps a big
+                    # core with a mid median.
+                    if _f30 < 27.0 or _gm > 75.0:
                         report.append(
                             f"ref look: gen does not match the ref sprite "
-                            f"(median palette distance {_gm:.0f} > 60) -- "
-                            "snapping would mangle it; using the gen's own "
-                            "colors (re-gen or swap the ref slot to match)")
+                            f"(core {_f30:.0f}% of px near a ref color, "
+                            f"median distance {_gm:.0f}) -- snapping would "
+                            "mangle it; using the gen's own colors "
+                            "(re-gen or swap the ref slot to match)")
                         look = "Hi-bit cel shading"
                     else:
                         report.append(
-                            f"ref guard: gen matches the ref (median "
-                            f"palette distance {_gm:.0f} <= 60)")
+                            f"ref guard: gen matches the ref (core "
+                            f"{_f30:.0f}% of px near a ref color, median "
+                            f"distance {_gm:.0f})")
                 else:
                     report.append("ref guard: no opaque px -- skipped")
             except Exception as _e:
@@ -860,6 +912,7 @@ class PixelForgeSuperForge:
         capture("look", images, alpha, pixel_exact=True)
 
         # ---------------- stage: motion fix ----------------
+        _mark("motion")
         m_mode, m_thr, m_commit, m_hold = None, None, None, None
         if _MOTION[motion_fix] is not None:
             m_mode, m_thr, m_commit, m_hold = _MOTION[motion_fix]
@@ -879,6 +932,7 @@ class PixelForgeSuperForge:
             meta["motion"] = {"skipped": True, "frames": 0, "shown": 0, "w": 0, "h": 0}
 
         # ---------------- crop & anchor ----------------
+        _mark("crop")
         # Suite placement dot: nudges the sprite inside a fixed canvas
         # (frontend writes placement_x/y from the dot, center-relative).
         snap = _pick(adv_crop_snap, 8)
@@ -920,6 +974,7 @@ class PixelForgeSuperForge:
         report.append(f"crop: {crop_info}")
 
         # ---------------- loop trim ----------------
+        _mark("loop")
         images, alpha, loop_info = PixelForgeLoopTrim().run(
             images, _LOOPS[loop_mode],
             _pick(adv_loop_max_error, 0.06),
@@ -927,6 +982,7 @@ class PixelForgeSuperForge:
         report.append(f"loop: {loop_info}")
 
         # ---------------- dedup -> final ----------------
+        _mark("dedup")
         durations_json = ""
         durations_frames = None
         if remove_duplicate_frames:
@@ -978,10 +1034,14 @@ class PixelForgeSuperForge:
         except Exception:
             pass
 
+        _mark("finalize")
         capture("final", images, alpha, pixel_exact=True)
 
         n = images.shape[0]
         h, w = images.shape[1], images.shape[2]
+        _mark("done")
+        if _phase_log:
+            report.append("phases: " + " | ".join(_phase_log))
         report.insert(0, f"OK: {n} frames @ {w}x{h}")
         report_str = " | ".join(report)
 

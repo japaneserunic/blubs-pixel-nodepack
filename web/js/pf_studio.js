@@ -489,6 +489,12 @@ const STYLES = `
     font-size:9.5px; color:#9a9aa8; font-variant-numeric:tabular-nums;
     white-space:nowrap; overflow:hidden; }
 .pfs-status b { color:#ff9d45; font-weight:700; }
+.pfs-phase { flex:0 0 auto; padding:2px 10px; background:#181022;
+    border-bottom:1px solid #26262f; font-size:9.5px; color:#9a9aa8;
+    font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; }
+.pfs-phase b { color:#ffb35c; font-weight:700; }
+.pfs-phase .dim { color:#6a6a78; }
 `;
 
 let styleEl = document.getElementById("pfs-styles");
@@ -533,6 +539,7 @@ function checkerTile() {
 function createForge(node, config) {
     const st = {
         stages: {}, order: [], meta: {}, report: "", durations: null,
+        phase: { cur: "", trail: [], t0: 0 },   // v3.8.8 live phase strip
         imgs: {}, thumbs: {},
         stage: "final", frame: 0,
         playing: false, loop: true, fps: 12,
@@ -1253,6 +1260,24 @@ function createForge(node, config) {
         refreshGenTarget();
     }
 
+    // ---- phase strip (v3.8.8): live "what is the forge doing" line at the
+    // very top of the node — current phase + ticking elapsed, plus the trail
+    // of completed phase durations so a slow section is obvious at a glance.
+    const phaseEl = document.createElement("div"); phaseEl.className = "pfs-phase";
+    phaseEl.textContent = "forge idle";
+    function renderPhase() {
+        const ph = st.phase;
+        const trail = ph.trail.map(t => `<span class="dim">${t}</span>`).join(" \u25B8 ");
+        if (ph.cur && ph.cur !== "done") {
+            const el = ((performance.now() - ph.t0) / 1000).toFixed(1);
+            phaseEl.innerHTML = (trail ? trail + " \u25B8 " : "") + `<b>${ph.cur}</b> ${el}s`;
+        } else if (ph.trail.length) {
+            phaseEl.innerHTML = trail + " \u25B8 <b>done</b>";
+        } else {
+            phaseEl.textContent = "forge idle";
+        }
+    }
+
     // ---- status bar ----
     const status = document.createElement("div"); status.className = "pfs-status";
     status.textContent = "idle — queue a prompt to forge";
@@ -1430,7 +1455,7 @@ function createForge(node, config) {
         st._imagesWired = imagesWired;
     }
 
-    [bar, sockBar, main, transport, tlWrap, status].forEach(e => root.appendChild(e));
+    [phaseEl, bar, sockBar, main, transport, tlWrap, status].forEach(e => root.appendChild(e));
 
     // ---- keyboard shortcuts: tools, transport, layer ops ----
     root.addEventListener("keydown", (e) => {
@@ -3767,6 +3792,17 @@ function createForge(node, config) {
             if (message && (message.pf_layers || message.pf_frames || message.pf_stages || message.pf_export_gif)) loadStages(message);
         },
         onResize() { draw(); drawTl(); syncWrapGeometry(); },
+        setPhase(d) {   // v3.8.8: backend _mark() event -> top strip
+            if (d.reset) st.phase = { cur: "", trail: [], t0: 0 };
+            st.phase.trail = Array.isArray(d.trail) ? d.trail : st.phase.trail;
+            if (d.done_phase) st.phase.trail.push(d.done_phase);
+            st.phase.cur = d.phase || "";
+            st.phase.t0 = performance.now();
+            renderPhase();
+        },
+        tickPhase() {   // keep the current phase's elapsed counting
+            if (st.phase.cur && st.phase.cur !== "done") renderPhase();
+        },
         onConfigure() {
             applyProps();
             // Guarantee at least one layer after ANY restore path — a saved
@@ -3822,6 +3858,22 @@ app.registerExtension({
             wrapped._pfWrapped = true;
             app.queuePrompt = wrapped;
         }
+        // v3.8.8: live phase strip — backend _mark() events drive the top
+        // line; a 500ms tick keeps the current phase's elapsed counting.
+        app.api.addEventListener("pf_studio_phase", (ev) => {
+            const d = (ev && ev.detail) || {};
+            const g = app.graph;
+            if (!g || !g.getNodeById) return;
+            const n = g.getNodeById(Number(d.node)) || g.getNodeById(d.node);
+            if (n && n._pfs && n._pfs.setPhase) n._pfs.setPhase(d);
+        });
+        setInterval(() => {
+            const g = app.graph;
+            if (!g || !g._nodes) return;
+            for (const n of g._nodes) {
+                if (n._pfs && n._pfs.tickPhase) n._pfs.tickPhase();
+            }
+        }, 500);
     },
     beforeRegisterNodeDef(nodeType, nodeData) {
         const config = NODE_CONFIGS[nodeData.name];

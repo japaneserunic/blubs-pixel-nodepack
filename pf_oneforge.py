@@ -39,7 +39,8 @@ from PIL import Image
 
 from .pf_easy import PixelForgeEasyExport, PixelForgeEasyPrompt, _BACKGROUNDS
 from .pf_sampler import PixelForgeH3FlatSigmas, PixelForgeH3PixelSampler
-from .pf_studio import PixelForgeSuperForge, _save_stage, _REF_LOOK
+from .pf_studio import (PixelForgeSuperForge, _save_stage, _REF_LOOK,
+                        PromptServer as _PF_PROMPT_SERVER)
 # v3.6.0-bgsync uses these for the backdrop-synced gen prompt (the edit that
 # introduced the call sites forgot this import — NameError on first Forge).
 from .pf_h3 import FPS as _H3_FPS, PixelForgeH3Prompt, clause_for_hex
@@ -483,7 +484,8 @@ class PixelForgeOneForge:
             "ref_image_2": ("IMAGE", {"tooltip": "Optional second reference — becomes <Picture 2>."}),
         }
         optional.update(forge_optional)   # alpha, custom_palette_image
-        return {"required": required, "optional": optional}
+        return {"required": required, "optional": optional,
+                "hidden": {"unique_id": "UNIQUE_ID"}}
 
     # ------------------------------------------------------------------ run
     def run(self, character, action, style, seconds, seamless_loop,
@@ -499,8 +501,27 @@ class PixelForgeOneForge:
             prompt_segments="[]", gen_win_start=0,
             images=None, first_frame=None, ref_image_2=None,
             alpha=None, custom_palette_image=None,
-            **forge):
+            unique_id=None, **forge):
         log_lines = []
+
+        # v3.8.8: phase self-report (generate/forge/export) on the same top
+        # strip the forge sub-phases use. generate = model load + H3 sampling
+        # (the long pole); its duration enters the forge trail as a prefix.
+        import time as _time
+        _ot0 = _time.perf_counter()
+
+        def _of_phase(label, done_phase=None, reset=False):
+            print(f"[OneForge] phase: {label}"
+                  + (f" (prev {done_phase})" if done_phase else ""), flush=True)
+            try:
+                if _PF_PROMPT_SERVER is not None and unique_id is not None:
+                    _PF_PROMPT_SERVER.instance.send_sync("pf_studio_phase", {
+                        "node": str(unique_id), "phase": label,
+                        "done_phase": done_phase, "reset": reset})
+            except Exception:
+                pass
+
+        _of_phase("generate", reset=True)
 
         # ---------------- 1. generate (unless images wired in) ----------------
         if images is None:
@@ -663,14 +684,18 @@ class PixelForgeOneForge:
 
         # ---------------- 2. forge (SuperForge engine, untouched) ----------------
         print("[OneForge] forging pixels…", flush=True)
+        _gen_s = _time.perf_counter() - _ot0
         forge_out = PixelForgeSuperForge().run(
             images, alpha=alpha, custom_palette_image=custom_palette_image,
-            **forge)
+            unique_id=unique_id,
+            phase_prefix=[f"generate {_gen_s:.1f}s"], **forge)
         f_images, f_alpha, durations_json, palette_json, forge_report = forge_out["result"]
         forge_ui = forge_out.get("ui", {})
 
         # ---------------- 3. export (EasyExport engine, untouched) ----------------
         print("[OneForge] exporting…", flush=True)
+        _et0 = _time.perf_counter()
+        _of_phase("export")
         exp = PixelForgeEasyExport().run(
             f_images, filename_prefix, export_fps, make_gif, gif_size,
             make_sheet, sheet_columns, sheet_bg, build_aseprite, aseprite_path,
@@ -705,6 +730,7 @@ class PixelForgeOneForge:
         except Exception as e:
             log.warning("[OneForge] sheet preview failed: %s", e)
 
+        _of_phase("done", done_phase=f"export {_time.perf_counter() - _et0:.1f}s")
         head = " | ".join(log_lines)
         full_forge_report = f"{head} | {forge_report}" if head else forge_report
         return {
