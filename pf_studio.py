@@ -1,3 +1,4 @@
+# VERSION: v3.9.0-guardquorum (2026-08-19) -- the pooled dual-read ref guard false-tripped on live 6b7e1105f3 (Sasuke + a giant lavender sleeping bag: pooled core 27.2% / median 95.7 > 75 -> silent Hi-bit fallback at the guard-kept 176x176 Source grid = "density way too high, colors in wrong areas"). Now ALSO a per-frame quorum: pass when the pooled read passes OR >= 1/3 of frames individually pass (measured on all 9 preserved runs: matching quorum 46-100%, foreign f62d944eee/0e9d79c09e 0%). Also (pf_oneforge): v3.9.0-turbosteps clamps steps >8 -> 4 when a turbo LoRA is armed (288.8s -> ~100s generate).
 # VERSION: v3.8.8-guardcore+phases (2026-08-18) -- (1) the v3.8.7 median-only ref guard false-tripped on MATCHING gens with a big foreign prop (live e49f434bfa/0d79b30fd6: Sasuke + giant cake = median 62-63 > 60 -> silent Hi-bit fallback). Now dual-read: core-within-30 >= 27% AND median <= 75 (measured on all 7 preserved runs: matching core 32-43% / median 39-63, foreign core 1-23% / median 86-130). (2) phase self-report: every pipeline section emits pf_studio_phase + a console line, the node shows a live phase strip at its top, and section durations land in the forge report.
 # VERSION: v3.7.9-truecolors (2026-08-18) — the "inner" outline was the black-crush/eaten-sprite bug: on a small art grid (78x77) the inner silhouette ring is ~9%% of the sprite; repainting it near-black ate thin limbs + read as holes (measured on real v9 run uid b77f508dce: outline ON mean|d| 58 vs grid, ~700 near-black px; OFF 25.8 / ~200, colors match the gen). Default outline now OFF (H3 already draws its own outline; adv_tp_outline can force it). Subject palette share 0.75 -> 1.0 (wired alpha = invisible backdrop; the 4 bg clusters were pure transparent-black bases that black-holed dark shading px).
 # VERSION: v3.7.8-regionvote (2026-08-17) — TruePixel classifies base+band from a 3x3-median signal (per-px argmin on 95%-speckle grid-res input = deepfry), 2x 3x3 majority region vote on the final class map, thin dark lines + inner ring snapped to ONE global outline color (unbroken black outline, no navy patchwork), grid report prints block/offset, full-res source frame dump for forensics
@@ -649,6 +650,7 @@ class PixelForgeSuperForge:
                 _pal_g, _bg_g, _k_g, _art_g = _ref_palette(_rg, colors)
                 _pg = np.array(_pal_g, np.float32)
                 _gs = []
+                _fstats = []
                 for _i in range(images.shape[0]):
                     _fr = (images[_i].clamp(0, 1) * 255).round().to(
                         torch.uint8).cpu().numpy()
@@ -664,7 +666,19 @@ class PixelForgeSuperForge:
                     else:
                         _fr = _fr.reshape(-1, 3)
                     if len(_fr):
-                        _gs.append(_fr.astype(np.float32))
+                        _fr = _fr.astype(np.float32)
+                        _gs.append(_fr)
+                        # v3.9.0-guardquorum: per-frame read (see verdict)
+                        _frm = (_fr[:, :1] + _pg[None, :, 0]) / 2.0
+                        _fd2 = ((2.0 + _frm / 256.0)
+                                * (_fr[:, :1] - _pg[None, :, 0]) ** 2
+                                + 4.0 * (_fr[:, 1:2] - _pg[None, :, 1]) ** 2
+                                + (2.0 + (255.0 - _frm) / 256.0)
+                                * (_fr[:, 2:3] - _pg[None, :, 2]) ** 2)
+                        _fdm = np.sqrt(_fd2.min(1))
+                        _fstats.append(
+                            (float((_fdm < 30.0).mean() * 100.0),
+                             float(np.median(_fdm))))
                 if _gs:
                     _gp = np.concatenate(_gs)
                     if len(_gp) > 200000:
@@ -689,14 +703,31 @@ class PixelForgeSuperForge:
                     # a white-heavy foreign character keeps a big core but
                     # a high median, a prop-heavy matching gen keeps a big
                     # core with a mid median.
-                    if _f30 < 27.0 or _gm > 75.0:
+                    # v3.9.0-guardquorum: a giant foreign PROP poisons the
+                    # pooled read while the character stays on-palette in
+                    # most frames (live 6b7e1105f3: sleeping bag = pooled
+                    # median 95.7 > 75, frame quorum 46%). Pass when the
+                    # pooled dual-read passes OR >= 1/3 of frames pass it.
+                    _q = 0.0
+                    if _fstats:
+                        _q = float(np.mean(
+                            [1.0 if (c >= 27.0 and m <= 75.0) else 0.0
+                             for c, m in _fstats]))
+                    if (_f30 < 27.0 or _gm > 75.0) and _q < 1.0 / 3.0:
                         report.append(
                             f"ref look: gen does not match the ref sprite "
                             f"(core {_f30:.0f}% of px near a ref color, "
-                            f"median distance {_gm:.0f}) -- snapping would "
+                            f"median distance {_gm:.0f}, frame quorum "
+                            f"{_q * 100:.0f}%) -- snapping would "
                             "mangle it; using the gen's own colors "
                             "(re-gen or swap the ref slot to match)")
                         look = "Hi-bit cel shading"
+                    elif _f30 < 27.0 or _gm > 75.0:
+                        report.append(
+                            f"ref guard: gen matches the ref on "
+                            f"{_q * 100:.0f}% of frames (prop-heavy batch; "
+                            f"pooled core {_f30:.0f}%, median {_gm:.0f}) "
+                            "-- snapping per the frame quorum")
                     else:
                         report.append(
                             f"ref guard: gen matches the ref (core "

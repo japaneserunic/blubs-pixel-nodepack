@@ -652,6 +652,18 @@ class PixelForgeOneForge:
             sampler = _unpack(sm.KSamplerSelect.execute(sampler_name=sampler_name))[0]
             sampler = PixelForgeH3PixelSampler().wrap(
                 sampler, temporal_blend, loop_noise, edge_commit)[0]
+            # VERSION: v3.9.0-turbosteps (2026-08-19) -- the turbo LoRAs are
+            # 4-step distilled; at the 15-step er_sde default they cost 3-4x
+            # gen time for no gain (live 6b7e1105f3: 15 steps x 15.7s/it =
+            # 235s sampling + 40s decode = 288.8s generate phase; 4 steps
+            # ~= 63s). Clamp loudly; manual steps <= 8 are respected.
+            if turbo_lora != "none" and steps > 8:
+                print(f"[OneForge] turbo LoRA active: steps {steps} -> 4 "
+                      "(4-step distilled LoRA)", flush=True)
+                log_lines.append(
+                    f"turbo LoRA: steps {steps} -> 4 (4-step distilled; "
+                    "15 steps = 3-4x gen time, no quality gain)")
+                steps = 4
             sigmas = PixelForgeH3FlatSigmas().get_sigmas(
                 model, scheduler, steps, tail_compress)[0]
 
