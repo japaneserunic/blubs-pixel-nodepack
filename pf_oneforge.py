@@ -384,7 +384,7 @@ class PixelForgeOneForge:
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                      "tooltip": "Noise seed. Same seed + same prompt = same clip."}),
             "steps": ("INT", {"default": 15, "min": 1, "max": 64,
-                      "tooltip": "15 with er_sde is the battle-tested setting; 4 when the turbo LoRA is on."}),
+                      "tooltip": "15 with er_sde is the battle-tested setting; 8 when the turbo LoRA is on (4 = fast draft, ref-adherence lottery)."}),
             "sampler_name": (_comfy_samplers(), {"default": "er_sde"}),
             "scheduler": (_comfy_schedulers(), {"default": "simple"}),
             "tail_compress": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.9, "step": 0.05,
@@ -549,6 +549,20 @@ class PixelForgeOneForge:
             wh = _SIZE_PRESETS.get(gen_size)
             width, height = wh if wh else (gen_width, gen_height)
             log_lines.append(f"prompt: {length}f @ {width}x{height}")
+            # v3.9.1: sub-0.5MP canvases ignore a wired ref at ANY step
+            # count (v400 matrix, seed 1073022300225716: 448x448 trips the
+            # ref guard at 4/6/8 steps; 704x704 passes at 8). Warn loudly
+            # when a Reference-look gen targets a small canvas with a
+            # suite ref wired.
+            if (forge.get("look") == _REF_LOOK
+                    and (first_frame is not None or drawn_ref_image)
+                    and max(width, height) < 640):
+                _w = (f"WARN gen size: {width}x{height} too small for "
+                      "Reference look -- measured 448x448 gens ignore the "
+                      "ref at 4/6/8 steps (guard trips, colors fall back "
+                      "to gen). Use 0.5MP+ (704x704).")
+                print(f"[OneForge] {_w}", flush=True)
+                log_lines.append(_w)
 
             print("[OneForge] loading models…", flush=True)
             model = _core_nodes.UNETLoader().load_unet(unet_name, "default")[0]
@@ -652,23 +666,39 @@ class PixelForgeOneForge:
             sampler = _unpack(sm.KSamplerSelect.execute(sampler_name=sampler_name))[0]
             sampler = PixelForgeH3PixelSampler().wrap(
                 sampler, temporal_blend, loop_noise, edge_commit)[0]
-            # VERSION: v3.9.0-turbosteps (2026-08-19) -- the turbo LoRAs are
+            # VERSION: v3.9.1-turbo8 (2026-08-19) -- the turbo LoRAs are
             # 4-step distilled; at the 15-step er_sde default they cost 3-4x
-            # gen time for no gain (live 6b7e1105f3: 15 steps x 15.7s/it =
-            # 235s sampling + 40s decode = 288.8s generate phase; 4 steps
-            # ~= 63s). Clamp loudly; manual steps <= 8 are respected.
+            # gen time (live 6b7e1105f3: 288.8s generate phase). v3.9.0
+            # clamped to 4 -- but the v400 decision matrix (same seed
+            # 1073022300225716, same prompt) shows 4 steps is a ref-adherence
+            # LOTTERY: 704/4-step tripped the ref guard at quorum 0% while
+            # 704/8-step PASSED with the best-ever reads (core 34%, median
+            # 36); a ref-match prompt clause did NOT rescue 4-step (quorum
+            # 0%). 448x448 trips at 4/6/8 steps regardless (0.2MP ignores
+            # refs). Clamp to 8 = the cheapest measured on-model config;
+            # manual steps <= 8 still respected (4 = fast draft, no ref
+            # guarantee).
             if turbo_lora != "none" and steps > 8:
-                print(f"[OneForge] turbo LoRA active: steps {steps} -> 4 "
-                      "(4-step distilled LoRA)", flush=True)
+                print(f"[OneForge] turbo LoRA active: steps {steps} -> 8 "
+                      "(4-step distilled LoRA; 4 steps = ref-adherence "
+                      "lottery, v400 matrix)", flush=True)
                 log_lines.append(
-                    f"turbo LoRA: steps {steps} -> 4 (4-step distilled; "
-                    "15 steps = 3-4x gen time, no quality gain)")
-                steps = 4
+                    f"turbo LoRA: steps {steps} -> 8 (4-step distilled; "
+                    "4 = seed lottery vs the ref, 15 = 3-4x gen time)")
+                steps = 8
             sigmas = PixelForgeH3FlatSigmas().get_sigmas(
                 model, scheduler, steps, tail_compress)[0]
 
             print(f"[OneForge] sampling {steps} steps ({sampler_name}/{scheduler})…",
                   flush=True)
+            # v3.9.1-seededrng: er_sde draws per-step SDE noise from torch's
+            # GLOBAL RNG, not the seed widget -- "same seed" only reproduced
+            # inside one process's RNG stream (measured: f043a45d43 vs
+            # f256c380b2, same seed/steps/prompt, different server processes
+            # -> completely different clips; one guard PASS, one TRIP).
+            # Seed the global RNG so a seed is a bankable, reproducible
+            # draw across restarts.
+            torch.manual_seed(int(seed) % (2**31))
             sampled = _unpack(sm.SamplerCustomAdvanced.execute(
                 noise=noise, guider=guider, sampler=sampler, sigmas=sigmas,
                 latent_image=latent))[0]
