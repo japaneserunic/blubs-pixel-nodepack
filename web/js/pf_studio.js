@@ -2028,6 +2028,30 @@ function createForge(node, config) {
                 }
             }
 
+            // v3.8.9 A/B split source: the backend ships the H3 gen frames
+            // as pf_debug_stages.source — build Image objects so the A/B
+            // toggle can split source-vs-forge in the layers path too
+            // (st.imgs.source previously only existed in the legacy
+            // pf_frames path, so the A/B button drew nothing).
+            st.imgs = st.imgs || {};
+            st.imgs.source = (st.debugStages.source || []).map((r) => {
+                if (!r || !r.filename) return null;
+                const im = new Image();
+                im.src = viewURL(r);
+                im.onload = () => { if (st.ab) draw(); };
+                return im;
+            }).filter(Boolean);
+            // STAGE info: surface the final stage meta in the layers path
+            // (the panel read st.meta, which only the legacy path filled,
+            // so it always showed "no stage data").
+            const _lm = (layerList[0] && layerList[0].meta) || {};
+            st.meta = st.meta || {};
+            st.meta.final = {
+                frames: _lm.frameCount || (incoming[0] ? incoming[0].frames.length : 0),
+                w: _lm.w || 0, h: _lm.h || 0,
+                shown: _lm.frameCount || (incoming[0] ? incoming[0].frames.length : 0),
+            };
+
             _recalcTotalFrames();
             _invalidateAllComposites();
             st.frame = regenStart >= 0 ? regenStart : 0;
@@ -2332,7 +2356,22 @@ function createForge(node, config) {
         // ==== Layer compositing path ====
         if (st.layers.length) {
             const composite = compositeFrame(st.frame);
-            if (composite && composite.width > 0) {
+            // v3.8.9: A/B split in the layers path — left = the H3 source
+            // video frames (shipped as pf_debug_stages.source), right = the
+            // forge composite. The divider drag is handled by the existing
+            // pointer handler via st.abSplit.
+            const abImgs = (st.ab && st.imgs && st.imgs.source && st.imgs.source.length) ? st.imgs.source : null;
+            if (composite && composite.width > 0 && abImgs) {
+                const splitX = Math.round(cw * st.abSplit);
+                const si = abImgs[Math.min(st.frame, abImgs.length - 1)];
+                drawFrameInto(si, { x: 0, y: 0, w: splitX, h: ch }, st.frame, abImgs);
+                drawFrameInto(composite, { x: splitX, y: 0, w: cw - splitX, h: ch }, st.frame, null);
+                ctx.strokeStyle = "#ff9d45"; ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(splitX, 0); ctx.lineTo(splitX, ch); ctx.stroke();
+                ctx.fillStyle = "#ff9d45"; ctx.font = "10px sans-serif";
+                ctx.fillText("SOURCE (H3)", 6, 14);
+                ctx.fillText("FORGE", splitX + 6, 14);
+            } else if (composite && composite.width > 0) {
                 // Onion skin: ghost previous composited frame
                 if (st.onion && st.frame > 0) {
                     const prevComposite = compositeFrame(st.frame - 1);
