@@ -47,14 +47,49 @@ def _corner_key(arr):
     return np.median(corners, axis=0)
 
 
-def _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance):
+def _border_keys(arr, max_keys=3, min_share=0.08, merge_dist=32.0):
+    """Dominant border-ring colors across the batch (multi-color backdrops).
+
+    'auto' used to sample the CORNERS only -- a backdrop that never reaches
+    the corners was never keyed (run 20818cd458: white studio field = 69%
+    of the frame + green letterbox bars; corners land in the bars, only
+    the 11% green got keyed, the white field stayed opaque as 'content').
+    Sample the full border ring, quantize to 16-step buckets, and return
+    every color covering >= min_share of ring px (most frequent first,
+    near-duplicate buckets merged). Single-color screens return one key
+    ~= the old corner median."""
+    n, h, w, _ = arr.shape
+    p = max(2, min(h, w) // 16)
+    ring = np.concatenate([
+        arr[:, :p, :].reshape(-1, 3), arr[:, -p:, :].reshape(-1, 3),
+        arr[:, :, :p].reshape(-1, 3), arr[:, :, -p:].reshape(-1, 3)])
+    q = (ring.astype(np.int32) // 16) * 16 + 8
+    buckets, counts = np.unique(q, axis=0, return_counts=True)
+    out = []
+    for idx in np.argsort(-counts):
+        if counts[idx] < min_share * counts.sum():
+            break
+        sel = np.all(q == buckets[idx], axis=1)
+        med = np.median(ring[sel], axis=0).astype(np.float32)
+        if any(float(np.sqrt(((med - k) ** 2).sum())) < merge_dist
+               for k in out):
+            continue
+        out.append(med)
+        if len(out) >= max_keys:
+            break
+    return out
+
+
+def _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance,
+                    lab=None):
     """Lab-space backdrop candidate mask.
 
     A pixel is a background candidate when its chroma (a,b) is close to the
     key color and its luminance isn't far ABOVE the key — but it may be much
     DARKER (shadow_tolerance): shadows a video model paints on a green screen
     keep the screen's hue and only drop L."""
-    lab = _rgb_to_lab(frame_rgb.reshape(-1, 3)).reshape(frame_rgb.shape)
+    if lab is None:
+        lab = _rgb_to_lab(frame_rgb.reshape(-1, 3)).reshape(frame_rgb.shape)
     key_lab = _rgb_to_lab(key_rgb.reshape(1, 3))[0]
 
     dL = lab[..., 0] - key_lab[0]
@@ -90,6 +125,19 @@ def _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance):
     return cand
 
 
+def _candidates_multi(frame_rgb, keys, tolerance, shadow_tolerance,
+                      lab=None):
+    """Union of backdrop candidates over several key colors (one shared
+    Lab conversion per frame)."""
+    if lab is None:
+        lab = _rgb_to_lab(frame_rgb.reshape(-1, 3)).reshape(frame_rgb.shape)
+    cand = np.zeros(frame_rgb.shape[:2], dtype=bool)
+    for k in keys:
+        cand |= _key_candidates(frame_rgb, k, tolerance, shadow_tolerance,
+                                lab=lab)
+    return cand
+
+
 def _border_connected(cand):
     """Keep only candidate components touching the frame border."""
     lbl, _n = ndimage.label(cand, structure=_STRUCT8)
@@ -110,7 +158,8 @@ def _flood_bg(frame_rgb, key_rgb, tolerance, shadow_tolerance):
 
 def _rescue_subject(frame_rgb, bg, key_rgb, tolerance, shadow_tolerance,
                     eat_fraction=0.85, min_subject_fraction=0.02,
-                    interior_tolerance=0.5, interior_max_area=0):
+                    interior_tolerance=0.5, interior_max_area=0,
+                    lab=None):
     """Undo catastrophic subject-eating floods (white-suit-on-white-backdrop).
 
     Trigger: the flood keyed nearly the WHOLE frame AND almost no subject
@@ -132,7 +181,7 @@ def _rescue_subject(frame_rgb, bg, key_rgb, tolerance, shadow_tolerance,
         # a real subject survived the flood; nothing catastrophic happened
         return bg
     strict = _key_candidates(frame_rgb, key_rgb, tolerance * 0.4,
-                             shadow_tolerance)
+                             shadow_tolerance, lab=lab)
     interior = ~_border_connected(strict)
     lbl, nl = ndimage.label(interior, structure=_STRUCT8)
     if nl <= 0:
@@ -152,11 +201,11 @@ def _rescue_subject(frame_rgb, bg, key_rgb, tolerance, shadow_tolerance,
     # them with the interior-gap pass so a rescued subject keeps its holes
     return _interior_gaps(frame_rgb, key_rgb, out, tolerance,
                           shadow_tolerance, interior_tolerance,
-                          interior_max_area)
+                          interior_max_area, lab=lab)
 
 
 def _interior_gaps(frame_rgb, key_rgb, bg, tolerance, shadow_tolerance,
-                   interior_tolerance=0.5, interior_max_area=0):
+                   interior_tolerance=0.5, interior_max_area=0, lab=None):
     """Enclosed interior regions tightly matching the backdrop -> add to bg.
 
     Fixes backdrop residue trapped INSIDE the silhouette (arm/pole/leg gaps)
@@ -169,9 +218,11 @@ def _interior_gaps(frame_rgb, key_rgb, bg, tolerance, shadow_tolerance,
     to this size. Real gaps between limbs are SMALL; a same-colored costume
     region (white chest plate on a white backdrop) is LARGE.
     """
-    cand = _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance)
+    cand = _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance,
+                           lab=lab)
     tight = _key_candidates(frame_rgb, key_rgb,
-                            tolerance * interior_tolerance, shadow_tolerance)
+                            tolerance * interior_tolerance, shadow_tolerance,
+                            lab=lab)
     lbl, nl = ndimage.label(cand, structure=_STRUCT8)
     if nl <= 0:
         return bg
@@ -193,15 +244,23 @@ def _interior_gaps(frame_rgb, key_rgb, bg, tolerance, shadow_tolerance,
 
 
 def _key_bg(frame_rgb, key_rgb, tolerance, shadow_tolerance,
-            key_interior=True, interior_tolerance=0.5, interior_max_area=0):
+            key_interior=True, interior_tolerance=0.5, interior_max_area=0,
+            keys=None, lab=None):
     """Full background mask: border-connected flood PLUS enclosed interior
-    regions (see _interior_gaps)."""
-    cand = _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance)
+    regions (see _interior_gaps). keys: optional list of backdrop colors
+    (multi-color auto backdrop) -- the flood unions their candidates;
+    interior gaps still reference the dominant key_rgb."""
+    if keys is not None:
+        cand = _candidates_multi(frame_rgb, keys, tolerance,
+                                 shadow_tolerance, lab=lab)
+    else:
+        cand = _key_candidates(frame_rgb, key_rgb, tolerance,
+                               shadow_tolerance, lab=lab)
     bg = _border_connected(cand)
     if not key_interior:
         return bg
     return _interior_gaps(frame_rgb, key_rgb, bg, tolerance, shadow_tolerance,
-                          interior_tolerance, interior_max_area)
+                          interior_tolerance, interior_max_area, lab=lab)
 
 
 class PixelForgeChromaKey:
@@ -214,7 +273,8 @@ class PixelForgeChromaKey:
     FUNCTION = "run"
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("images", "alpha")
-    DESCRIPTION = "Flood-key the background of pixel frames from the borders in (shadow-tolerant Lab space) plus enclosed interior gaps (arm/pole holes). 'auto' samples the corners. Hard 1-bit alpha (correct for pixel art); matte_erode strips the blended halo ring, despill decontaminates the edge color."
+    DESCRIPTION = "Flood-key the background of pixel frames from the borders in (shadow-tolerant Lab space) plus enclosed interior gaps (arm/pole holes). 'auto' samples the full border ring and keys every dominant border color (multi-color backdrops). Hard 1-bit alpha (correct for pixel art); matte_erode strips the blended halo ring, despill decontaminates the edge color."
+    LAST_AUTO_KEYS = None  # self-report: detected auto border keys
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -279,22 +339,39 @@ class PixelForgeChromaKey:
         n, h, w, _ = arr.shape
 
         if key_color.strip().lower() == "auto":
-            key = _corner_key(arr)
+            keys = _border_keys(arr)
+            if not keys:
+                keys = [_corner_key(arr)]
+            PixelForgeChromaKey.LAST_AUTO_KEYS = [
+                "#%02X%02X%02X" % tuple(int(round(float(c))) for c in k)
+                for k in keys]
+            if len(keys) > 1:
+                print("[PixelForgeChromaKey] auto backdrop: %d border "
+                      "colors keyed (%s)"
+                      % (len(keys), ", ".join(
+                          PixelForgeChromaKey.LAST_AUTO_KEYS)))
         else:
-            key = np.array(hex_to_rgb(key_color.strip()), dtype=np.float32)
+            keys = [np.array(hex_to_rgb(key_color.strip()),
+                             dtype=np.float32)]
+            PixelForgeChromaKey.LAST_AUTO_KEYS = None
+        key = keys[0]  # dominant key: interior-gap/rescue reference
 
         max_area_px = (interior_max_area / 100.0) * h * w
         if method == "flood":
             # 1) full per-frame keying (flood + interior gaps + rescue)
             fulls = []
             for i in range(n):
+                lab_i = _rgb_to_lab(
+                    arr[i].reshape(-1, 3)).reshape(arr[i].shape)
                 bg = _key_bg(arr[i], key, tolerance, shadow_tolerance,
-                             key_interior, interior_tolerance, max_area_px)
+                             key_interior, interior_tolerance, max_area_px,
+                             keys=keys, lab=lab_i)
                 if subject_rescue:
                     bg = _rescue_subject(arr[i], bg, key, tolerance,
                                          shadow_tolerance,
                                          interior_tolerance=interior_tolerance,
-                                         interior_max_area=max_area_px)
+                                         interior_max_area=max_area_px,
+                                         lab=lab_i)
                 fulls.append(bg)
             # 2) temporal majority — but only WEAK keyed pixels follow the
             #    vote (blended silhouette edge = the crawl). Anything this
@@ -308,9 +385,11 @@ class PixelForgeChromaKey:
                 acc[-1] = sm[-2] + sm[-1]
                 voted = acc >= 2
                 for i in range(n):
-                    tight = _key_candidates(arr[i], key,
-                                            tolerance * interior_tolerance,
-                                            shadow_tolerance)
+                    lab_i = _rgb_to_lab(
+                        arr[i].reshape(-1, 3)).reshape(arr[i].shape)
+                    tight = _candidates_multi(arr[i], keys,
+                                              tolerance * interior_tolerance,
+                                              shadow_tolerance, lab=lab_i)
                     # SYMMETRIC GUARD: the vote may only govern WEAK px
                     # (the blended silhouette edge = the crawl). A px that
                     # is strongly NOT backdrop this frame — fails the
@@ -321,9 +400,9 @@ class PixelForgeChromaKey:
                     # frames (the 'occlusion chunk' eater, measured 2026-08-14:
                     # 193k subject-colored px keyed with the unguarded vote
                     # vs 59k with the vote off, Gentle key, H3_00600).
-                    strong_fg = ~_key_candidates(arr[i], key,
-                                                 min(1.0, tolerance * 2.0),
-                                                 shadow_tolerance)
+                    strong_fg = ~_candidates_multi(
+                        arr[i], keys, min(1.0, tolerance * 2.0),
+                        shadow_tolerance, lab=lab_i)
                     fulls[i] = (voted[i] & ~strong_fg) | \
                                (fulls[i] & (tight | strong_fg))
             alpha = np.empty((n, h, w), dtype=np.float32)
@@ -341,6 +420,8 @@ class PixelForgeChromaKey:
                         main_id = 1 + int(np.argmax(sizes))
                         largest = float(sizes[main_id - 1])
                         main_lab = _rgb_to_lab(arr[i][lbl == main_id])
+                        near_main = ndimage.binary_dilation(
+                            lbl == main_id, structure=_STRUCT8, iterations=2)
                         keep = np.zeros(nl + 1, dtype=bool)
                         keep[0] = False
                         rescued = 0
@@ -356,6 +437,16 @@ class PixelForgeChromaKey:
                             # comp whose median color is well-represented
                             # inside the main component.
                             comp = lbl == (k + 1)
+                            # ADJACENCY GATE: rescue only comps still
+                            # touching the subject (a boot severed by a
+                            # 1-2px keyed ankle bridge). An island split
+                            # off by keyed backdrop -- the painted ground
+                            # shadow on a light field, motion smear -- is
+                            # debris, not a limb (run 20818cd458: 94k
+                            # black shadow px 'rescued' batch-wide =
+                            # full-frame crop boxes).
+                            if not (comp & near_main).any():
+                                continue
                             med = np.median(arr[i][comp], axis=0)
                             med_lab = _rgb_to_lab(med.reshape(1, 3))[0]
                             d = np.sqrt(((main_lab - med_lab) ** 2).sum(-1))
@@ -387,20 +478,22 @@ class PixelForgeChromaKey:
             alpha = np.clip((dist - tol) / soft, 0.0, 1.0)
 
         if despill:
-            dom = int(np.argmax(key))
-            other = [c for c in range(3) if c != dom]
-            edge = (alpha > 0.0) & (alpha < 1.0)
-            key_chroma = float(key.max() - key.min())
-            if key_chroma >= 60.0:
-                # saturated backdrop: also despill the HARD edge ring — with a
-                # 1-bit alpha the blended halo pixels are fully opaque, so the
-                # soft-edge-only despill never touched them (the green fringe).
-                fg = alpha > 0.5
-                ring = fg & ~ndimage.binary_erosion(fg)
-                edge = edge | ring
-            lim = arr[..., other].max(-1)
-            spill = edge & (arr[..., dom] > lim)
-            arr[..., dom] = np.where(spill, lim, arr[..., dom])
+            for dkey in keys:
+                dom = int(np.argmax(dkey))
+                other = [c for c in range(3) if c != dom]
+                edge = (alpha > 0.0) & (alpha < 1.0)
+                key_chroma = float(dkey.max() - dkey.min())
+                if key_chroma >= 60.0:
+                    # saturated backdrop: also despill the HARD edge ring --
+                    # with a 1-bit alpha the blended halo pixels are fully
+                    # opaque, so the soft-edge-only despill never touched
+                    # them (the green fringe).
+                    fg = alpha > 0.5
+                    ring = fg & ~ndimage.binary_erosion(fg)
+                    edge = edge | ring
+                lim = arr[..., other].max(-1)
+                spill = edge & (arr[..., dom] > lim)
+                arr[..., dom] = np.where(spill, lim, arr[..., dom])
 
         rgb = torch.from_numpy(arr.astype(np.float32) / 255.0)
         return (rgb, torch.from_numpy(alpha.astype(np.float32)))
