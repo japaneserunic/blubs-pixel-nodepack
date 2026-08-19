@@ -77,7 +77,8 @@ _REF_LOOK = "Reference (match ref sprite)"
 # v3.10.0-gennative: adv_ref_look_mode choices (see VERSION note).
 # v3.10.3-genraw: gen-native is a pure passthrough -- the keyed H3 gen
 # 1:1 (native grid, gen colors, no quantize / re-grid / RefMatch).
-_GEN_RAW = "Gen-native passthrough (1:1 keyed gen)"
+_GEN_RAW = "Gen-native passthrough (1:1 keyed gen)"  # v3.10.4: now
+# reached AFTER the native-grid flatten -- see the grid stage.
 _REF_LOOK_MODE_GEN = "Gen-native (1:1 with the H3 gen)"
 _REF_LOOK_MODE_LEGACY = "Reference look (legacy ref snap)"
 _REF_LOOK_MODES = [_REF_LOOK_MODE_GEN, _REF_LOOK_MODE_LEGACY]
@@ -277,7 +278,7 @@ class PixelForgeSuperForge:
                 "adv_ref_backdrop": (_TRI, {"default": "preset",
                                      "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = transparent (keyed bg, the pre-refmatch behavior); set on to bake the flat ref-color backdrop."}),
                 "adv_ref_look_mode": (list(_REF_LOOK_MODES), {"default": _REF_LOOK_MODE_GEN,
-                                     "tooltip": "Reference look mode. Gen-native (default): the keyed H3 gen 1:1 -- native grid, the gen's own colors, no re-grid / quantize / RefMatch; border-only keying (no interior hole punches). Reference look (legacy): the pre-v3.10.0 ref snap (refdensity grid + RefMatch palette snap)."}),
+                                     "tooltip": "Reference look mode. Gen-native (default): the keyed H3 gen as true pixel art at its own native block grid -- GridRecover detects the gen's native blocks, every block becomes one flat median color (kills the anti-alias mush = hard pixels), colors + content 1:1 the gen's, no palette quantize / density ruler / RefMatch; border-only keying (no interior hole punches). Reference look (legacy): the pre-v3.10.0 ref snap (refdensity grid + RefMatch palette snap)."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -484,7 +485,13 @@ class PixelForgeSuperForge:
         _mark("grid")
         src_grid = None
         grid_frames = images
-        if sharpen_grid and not _gennative:
+        # v3.10.4-genflatten: gen-native RUNS GridRecover -- the gen's own
+        # native block grid IS the art grid; every block becomes one flat
+        # (median) color + block-majority alpha = true hard pixels, the
+        # gen's own colors/content 1:1, no quantize. Stray faint edge px
+        # die at the majority-alpha rule (they stretched df1deac457's crop
+        # bbox to the full 704 frame).
+        if sharpen_grid or _gennative:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
                 images, adv_grid_mode, adv_grid_block, adv_grid_max_block,
                 adv_grid_reduce, False, alpha=alpha)
@@ -492,16 +499,19 @@ class PixelForgeSuperForge:
             try:
                 _gi = json.loads(ginfo)
                 report.append(
-                    f"grid: {gw}x{gh} (block {_gi.get('block')} @ "
+                    ("grid: native " if _gennative else "grid: ")
+                    + f"{gw}x{gh} (block {_gi.get('block')} @ "
                     f"{tuple(_gi.get('offset', [0, 0]))}"
-                    f"{'' if _gi.get('auto_detected') else ', manual'})")
+                    f"{'' if _gi.get('auto_detected') else ', manual'}"
+                    + (", gen-native flatten: every native block -> one "
+                       "flat median color, the gen's own colors 1:1)"
+                       if _gennative else ")"))
             except Exception:
                 report.append(f"grid: {gw}x{gh}")
         else:
-            report.append("grid: native (gen 1:1)" if _gennative
-                          else "grid: off")
+            report.append("grid: off")
         grid_frames = images
-        if sharpen_grid and not _gennative:
+        if sharpen_grid or _gennative:
             capture("grid", images, alpha, pixel_exact=True)
         else:
             meta["grid"] = {"skipped": True, "frames": 0, "shown": 0, "w": 0, "h": 0}
@@ -511,7 +521,8 @@ class PixelForgeSuperForge:
         _guard_kept = False
         if _gennative:
             tw, th = images.shape[2], images.shape[1]
-            report.append(f"size: native {tw}x{th} (gen 1:1, no resize)")
+            report.append(f"size: native {tw}x{th} (gen 1:1 art grid, "
+                          "no resize)")
         elif size_preset == "Custom size":
             tw, th = custom_width, custom_height
         elif size_preset == "Source / 2 (balanced)":
@@ -679,10 +690,11 @@ class PixelForgeSuperForge:
         # H3 output". Legacy mode = the pre-v3.10.0 ref snap.
         if look == _REF_LOOK and adv_ref_look_mode == _REF_LOOK_MODE_GEN:
             report.append(
-                "ref look mode: gen-native (1:1 keyed H3 gen -- native "
-                "grid, the gen's own colors; no re-grid, no quantize, no "
-                "RefMatch; adv_ref_look_mode = legacy restores the ref "
-                "snap pipeline)")
+                "ref look mode: gen-native (keyed H3 gen flattened to its "
+                "native block grid -- every block one flat median color, "
+                "the gen's own colors/content 1:1; no density ruler, no "
+                "quantize, no RefMatch; adv_ref_look_mode = legacy "
+                "restores the ref snap pipeline)")
             look = _GEN_RAW
         if look == _REF_LOOK and custom_palette_image is not None:
             # v3.8.7-refguard: gen<->ref compatibility gate. RefMatch assumes
@@ -917,9 +929,11 @@ class PixelForgeSuperForge:
         if look == _REF_LOOK:
             pass  # legacy ref look done above (density + RefMatch)
         elif look == _GEN_RAW:
-            # v3.10.3-genraw: the keyed frames ARE the output art.
+            # v3.10.4-genflatten: the flattened native-grid frames ARE the
+            # output art (flatten happened at the grid stage).
             report.append(
-                "look: gen-native passthrough (keyed gen 1:1, no quantize)")
+                "look: gen-native flatten (native block grid, the gen's "
+                "own colors 1:1, no quantize)")
         elif look.startswith("Hi-bit"):
             cel = look == "Hi-bit cel shading"
             # v3.7.4-looktune: retuned on the REAL 56-frame Sasuke run (uid
