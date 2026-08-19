@@ -75,6 +75,9 @@ _SUITE_SIZES = (["Source (H3's own grid)", "Source / 2 (balanced)"] +
 # + backdrop at forge time (see pf_finalize.PixelForgeRefMatch).
 _REF_LOOK = "Reference (match ref sprite)"
 # v3.10.0-gennative: adv_ref_look_mode choices (see VERSION note).
+# v3.10.3-genraw: gen-native is a pure passthrough -- the keyed H3 gen
+# 1:1 (native grid, gen colors, no quantize / re-grid / RefMatch).
+_GEN_RAW = "Gen-native passthrough (1:1 keyed gen)"
 _REF_LOOK_MODE_GEN = "Gen-native (1:1 with the H3 gen)"
 _REF_LOOK_MODE_LEGACY = "Reference look (legacy ref snap)"
 _REF_LOOK_MODES = [_REF_LOOK_MODE_GEN, _REF_LOOK_MODE_LEGACY]
@@ -274,7 +277,7 @@ class PixelForgeSuperForge:
                 "adv_ref_backdrop": (_TRI, {"default": "preset",
                                      "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = transparent (keyed bg, the pre-refmatch behavior); set on to bake the flat ref-color backdrop."}),
                 "adv_ref_look_mode": (list(_REF_LOOK_MODES), {"default": _REF_LOOK_MODE_GEN,
-                                     "tooltip": "Reference look mode. Gen-native (default): reduce the guard-kept Source grid to the ref ruler's pixel-art density (ref character block geometry) and quantize the palette from the gen itself (Hi-bit engine) -- no RefMatch palette snap; the output is the H3 gen 1:1 as its pixel-art representation. Reference look (legacy): the pre-v3.10.0 ref snap (refdensity grid + RefMatch palette snap)."}),
+                                     "tooltip": "Reference look mode. Gen-native (default): the keyed H3 gen 1:1 -- native grid, the gen's own colors, no re-grid / quantize / RefMatch; border-only keying (no interior hole punches). Reference look (legacy): the pre-v3.10.0 ref snap (refdensity grid + RefMatch palette snap)."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -314,6 +317,10 @@ class PixelForgeSuperForge:
         report = []
         uid = uuid.uuid4().hex[:10]
         stages, meta = {}, {}
+        # v3.10.3-genraw: gen-native decided up front -- it changes the
+        # keying profile, skips grid/size/look processing entirely.
+        _gennative = (look == _REF_LOOK
+                      and adv_ref_look_mode == _REF_LOOK_MODE_GEN)
 
         # v3.8.8: phase self-report -- every pipeline section announces
         # itself (console + pf_studio_phase event for the in-node top strip)
@@ -367,6 +374,12 @@ class PixelForgeSuperForge:
         if alpha is None:
             key_color = custom_bg_hex if background == "custom hex" else _BACKGROUNDS[background]
             tol_p, shadow_p = _KEY_STRENGTH[key_strength]
+            # v3.10.3-genraw: content-preserving keying. The interior-gap
+            # pass + matte erode punched 1.3k hole px into the f12d26cffb
+            # sprite (measured); gen-native keys the border-connected
+            # backdrop ONLY (rescue/temporal/drop_detached stay).
+            _ki = _tri(adv_key_interior, True) and not _gennative
+            _ke = _pick(adv_key_erode, 1) if not _gennative else 0
             images, alpha = PixelForgeChromaKey().run(
                 images, key_color,
                 _pick(adv_key_tolerance, tol_p),
@@ -374,16 +387,21 @@ class PixelForgeSuperForge:
                 _tri(adv_key_despill, True),
                 "flood" if adv_key_method == "preset" else adv_key_method,
                 _pick(adv_key_shadow, shadow_p),
-                _tri(adv_key_interior, True),
+                _ki,
                 _pick(adv_key_interior_tol, 0.5),
-                _pick(adv_key_erode, 1),
+                _ke,
                 _tri(adv_key_rescue, True),
                 _pick(adv_key_interior_max_area, 2.0),
                 _tri(adv_key_temporal_alpha, True),
-                _pick(adv_key_drop_detached, 5.0))
+                _pick(adv_key_drop_detached, 5.0),
+                neutral_key_tight=_gennative)
             _ak = getattr(PixelForgeChromaKey, "LAST_AUTO_KEYS", None)
             report.append(f"key: {key_color} ({key_strength.lower()})" +
-                          (f" [{', '.join(_ak)}]" if _ak else ""))
+                          (f" [{', '.join(_ak)}]" if _ak else "") +
+                          (" | gen-native key profile: border-only "
+                           "(no interior-gap pass, no matte erode, "
+                           "tight neutral keys)"
+                           if _gennative else ""))
             _keyed_here = True
             # v3.7.2-sandblast: letterbox / backdrop-variant rescue. H3
             # sometimes delivers a NON-uniform backdrop (measured on run
@@ -466,7 +484,7 @@ class PixelForgeSuperForge:
         _mark("grid")
         src_grid = None
         grid_frames = images
-        if sharpen_grid:
+        if sharpen_grid and not _gennative:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
                 images, adv_grid_mode, adv_grid_block, adv_grid_max_block,
                 adv_grid_reduce, False, alpha=alpha)
@@ -480,9 +498,10 @@ class PixelForgeSuperForge:
             except Exception:
                 report.append(f"grid: {gw}x{gh}")
         else:
-            report.append("grid: off")
+            report.append("grid: native (gen 1:1)" if _gennative
+                          else "grid: off")
         grid_frames = images
-        if sharpen_grid:
+        if sharpen_grid and not _gennative:
             capture("grid", images, alpha, pixel_exact=True)
         else:
             meta["grid"] = {"skipped": True, "frames": 0, "shown": 0, "w": 0, "h": 0}
@@ -490,7 +509,10 @@ class PixelForgeSuperForge:
         # ---------------- resolve target size ----------------
         _mark("size")
         _guard_kept = False
-        if size_preset == "Custom size":
+        if _gennative:
+            tw, th = images.shape[2], images.shape[1]
+            report.append(f"size: native {tw}x{th} (gen 1:1, no resize)")
+        elif size_preset == "Custom size":
             tw, th = custom_width, custom_height
         elif size_preset == "Source / 2 (balanced)":
             if src_grid is not None:
@@ -552,12 +574,13 @@ class PixelForgeSuperForge:
                 tw, th = images.shape[2], images.shape[1]
         else:
             tw, th = _SIZE_PRESETS[size_preset], _SIZE_PRESETS[size_preset]
-        report.append(f"size: {tw}x{th if th else 'auto'}")
+        if not _gennative:
+            report.append(f"size: {tw}x{th if th else 'auto'}")
         # Art-grid sanity guardrail (v3.7.0): past ~128px on the long side the
         # pixel structure is invisible and the output reads as a downscaled
         # image, not pixel art — the owner's "blown-up 200x200" failure mode.
         _long_side = max(tw, th if th else tw)
-        if _long_side > 128 and not _guard_kept:
+        if _long_side > 128 and not _guard_kept and not _gennative:
             report.append(
                 f"WARN size: {tw}x{th if th else 'auto'} art grid is very fine — "
                 "pixel structure won't read (blown-up-image look). "
@@ -606,6 +629,7 @@ class PixelForgeSuperForge:
         # Do the halve with the GridRecover engine's masked majority
         # reduce; the look stage then runs 1:1 (no resample at all).
         if (size_preset == "Source / 2 (balanced)" and not _guard_kept
+                and not _gennative
                 and abs(images.shape[2] - tw * 2) <= 1
                 and abs(images.shape[1] - th * 2) <= 1):
             _ha = (images.clamp(0, 1) * 255).round().to(
@@ -640,7 +664,8 @@ class PixelForgeSuperForge:
         dmode, dstrength = _DITHER[dither]
         palette_json = "{}"
         _gennative_density = False  # v3.10.2: gen-native + ref wired
-        if look == _REF_LOOK and custom_palette_image is None:
+        if (look == _REF_LOOK and custom_palette_image is None
+                and adv_ref_look_mode != _REF_LOOK_MODE_GEN):
             report.append(
                 "ref look: no ref image (arm a ref slot or wire "
                 "custom_palette_image) -- falling back to Hi-bit cel")
@@ -654,13 +679,11 @@ class PixelForgeSuperForge:
         # H3 output". Legacy mode = the pre-v3.10.0 ref snap.
         if look == _REF_LOOK and adv_ref_look_mode == _REF_LOOK_MODE_GEN:
             report.append(
-                "ref look mode: gen-native (1:1 as the gen's pixel-art "
-                "representation) -- grid reduced to the ref ruler's "
-                "pixel-art density, palette quantized from the gen itself; "
-                "RefMatch palette snap skipped (adv_ref_look_mode = legacy "
-                "restores the ref snap)")
-            _gennative_density = custom_palette_image is not None
-            look = "Hi-bit cel shading"
+                "ref look mode: gen-native (1:1 keyed H3 gen -- native "
+                "grid, the gen's own colors; no re-grid, no quantize, no "
+                "RefMatch; adv_ref_look_mode = legacy restores the ref "
+                "snap pipeline)")
+            look = _GEN_RAW
         if look == _REF_LOOK and custom_palette_image is not None:
             # v3.8.7-refguard: gen<->ref compatibility gate. RefMatch assumes
             # the gen IS the ref's character (hue-window + bandmatch snapping
@@ -893,6 +916,10 @@ class PixelForgeSuperForge:
                     report.append("look: reference match")
         if look == _REF_LOOK:
             pass  # legacy ref look done above (density + RefMatch)
+        elif look == _GEN_RAW:
+            # v3.10.3-genraw: the keyed frames ARE the output art.
+            report.append(
+                "look: gen-native passthrough (keyed gen 1:1, no quantize)")
         elif look.startswith("Hi-bit"):
             cel = look == "Hi-bit cel shading"
             # v3.7.4-looktune: retuned on the REAL 56-frame Sasuke run (uid

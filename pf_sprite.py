@@ -81,7 +81,7 @@ def _border_keys(arr, max_keys=3, min_share=0.08, merge_dist=32.0):
 
 
 def _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance,
-                    lab=None):
+                    lab=None, tight_neutral=False):
     """Lab-space backdrop candidate mask.
 
     A pixel is a background candidate when its chroma (a,b) is close to the
@@ -120,13 +120,23 @@ def _key_candidates(frame_rgb, key_rgb, tolerance, shadow_tolerance,
     else:
         # near-gray key: hue is unstable, fall back to chromatic distance
         dab2 = (lab[..., 1] - key_lab[1]) ** 2 + (lab[..., 2] - key_lab[2]) ** 2
-        chroma_tol2 = (12.0 + tolerance * 120.0) ** 2
-        cand = (dab2 < chroma_tol2) & (dL < l_up) & (dL > -l_down)
+        if tight_neutral:
+            # v3.10.3b-tightneutral: a neutral auto key (white studio
+            # field) sits dangerously close to costume whites in Lab -- the
+            # scaled gates (chroma_tol2 ~1764, l_down 60) admitted the
+            # cyan-white gi top on f12d26cffb (dab2 ~125, dL -12) and the
+            # border flood breached the outline seam = keyed-out chest.
+            # A flat neutral field keys fully under ABSOLUTE tight gates;
+            # costume whites (dL <= -12, dab2 >= ~125) stay subject.
+            cand = (dab2 < 81.0) & (dL < 10.0) & (dL > -8.0)
+        else:
+            chroma_tol2 = (12.0 + tolerance * 120.0) ** 2
+            cand = (dab2 < chroma_tol2) & (dL < l_up) & (dL > -l_down)
     return cand
 
 
 def _candidates_multi(frame_rgb, keys, tolerance, shadow_tolerance,
-                      lab=None):
+                      lab=None, tight_neutral=False):
     """Union of backdrop candidates over several key colors (one shared
     Lab conversion per frame)."""
     if lab is None:
@@ -134,7 +144,7 @@ def _candidates_multi(frame_rgb, keys, tolerance, shadow_tolerance,
     cand = np.zeros(frame_rgb.shape[:2], dtype=bool)
     for k in keys:
         cand |= _key_candidates(frame_rgb, k, tolerance, shadow_tolerance,
-                                lab=lab)
+                                lab=lab, tight_neutral=tight_neutral)
     return cand
 
 
@@ -245,14 +255,15 @@ def _interior_gaps(frame_rgb, key_rgb, bg, tolerance, shadow_tolerance,
 
 def _key_bg(frame_rgb, key_rgb, tolerance, shadow_tolerance,
             key_interior=True, interior_tolerance=0.5, interior_max_area=0,
-            keys=None, lab=None):
+            keys=None, lab=None, tight_neutral=False):
     """Full background mask: border-connected flood PLUS enclosed interior
     regions (see _interior_gaps). keys: optional list of backdrop colors
     (multi-color auto backdrop) -- the flood unions their candidates;
     interior gaps still reference the dominant key_rgb."""
     if keys is not None:
         cand = _candidates_multi(frame_rgb, keys, tolerance,
-                                 shadow_tolerance, lab=lab)
+                                 shadow_tolerance, lab=lab,
+                                 tight_neutral=tight_neutral)
     else:
         cand = _key_candidates(frame_rgb, key_rgb, tolerance,
                                shadow_tolerance, lab=lab)
@@ -334,7 +345,8 @@ class PixelForgeChromaKey:
     def run(self, images, key_color, tolerance, softness, despill,
             method="flood", shadow_tolerance=1.0, key_interior=True,
             interior_tolerance=0.5, matte_erode=1, subject_rescue=True,
-            interior_max_area=2.0, temporal_alpha=True, drop_detached=5.0):
+            interior_max_area=2.0, temporal_alpha=True, drop_detached=5.0,
+            neutral_key_tight=False):
         arr = _to_np(images).astype(np.float32)
         n, h, w, _ = arr.shape
 
@@ -365,7 +377,8 @@ class PixelForgeChromaKey:
                     arr[i].reshape(-1, 3)).reshape(arr[i].shape)
                 bg = _key_bg(arr[i], key, tolerance, shadow_tolerance,
                              key_interior, interior_tolerance, max_area_px,
-                             keys=keys, lab=lab_i)
+                             keys=keys, lab=lab_i,
+                             tight_neutral=neutral_key_tight)
                 if subject_rescue:
                     bg = _rescue_subject(arr[i], bg, key, tolerance,
                                          shadow_tolerance,
@@ -389,7 +402,8 @@ class PixelForgeChromaKey:
                         arr[i].reshape(-1, 3)).reshape(arr[i].shape)
                     tight = _candidates_multi(arr[i], keys,
                                               tolerance * interior_tolerance,
-                                              shadow_tolerance, lab=lab_i)
+                                              shadow_tolerance, lab=lab_i,
+                                              tight_neutral=neutral_key_tight)
                     # SYMMETRIC GUARD: the vote may only govern WEAK px
                     # (the blended silhouette edge = the crawl). A px that
                     # is strongly NOT backdrop this frame — fails the
@@ -402,7 +416,8 @@ class PixelForgeChromaKey:
                     # vs 59k with the vote off, Gentle key, H3_00600).
                     strong_fg = ~_candidates_multi(
                         arr[i], keys, min(1.0, tolerance * 2.0),
-                        shadow_tolerance, lab=lab_i)
+                        shadow_tolerance, lab=lab_i,
+                        tight_neutral=neutral_key_tight)
                     fulls[i] = (voted[i] & ~strong_fg) | \
                                (fulls[i] & (tight | strong_fg))
             alpha = np.empty((n, h, w), dtype=np.float32)
