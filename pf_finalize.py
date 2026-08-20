@@ -507,13 +507,57 @@ def _detect_pixel_grid_frac(frame_rgb, s_hint, alpha=None):
                     v = _within_cell_std(gray, wgt, p_fix, o_fix, p, o)
                 if best is None or v < best[0]:
                     best = (v, round(p, 4), round(o, 4))
-                o += 0.125
-            p += 0.005
+                o += 0.0625
+            p += 0.0025
         return best[1], best[2]
 
     px, ox = _refine(p_fx, o_fx, p_fy, o_fy, True)
     py, oy = _refine(p_fy, o_fy, px, ox, False)
-    # re-verify the gates at the refined point
+    # Rational snap v2: if w/p is within 0.05 of an integer n, try exact
+    # pitch w/n. Search offset around the fitted value AND around 0.
+    # Prefer o=0 only when its variance is within 15% of the fitted best.
+    # This fixes the ~7.33 case (true o=0, comparable variance) without
+    # breaking the ~8.585 case (true o=7.3, much better than 0).
+    def _snap(p, o, dim, move_x):
+        n = round(dim / p)
+        if n < 4:
+            return p, o
+        p_ex = dim / n
+        if abs(p_ex - p) > 0.05:
+            return p, o
+        best_fit = None
+        o_s = o - 0.25
+        while o_s <= o + 0.2501:
+            if move_x:
+                v = _within_cell_std(gray, wgt, p_ex, o_s, py, oy)
+            else:
+                v = _within_cell_std(gray, wgt, px, ox, p_ex, o_s)
+            if best_fit is None or v < best_fit[0]:
+                best_fit = (v, o_s)
+            o_s += 0.0625
+        # try near 0
+        best_zero = None
+        o_z = -0.25
+        while o_z <= 0.2501:
+            if move_x:
+                v = _within_cell_std(gray, wgt, p_ex, o_z, py, oy)
+            else:
+                v = _within_cell_std(gray, wgt, px, ox, p_ex, o_z)
+            if best_zero is None or v < best_zero[0]:
+                best_zero = (v, o_z)
+            o_z += 0.0625
+        v_fit = _within_cell_std(gray, wgt, px, ox, py, oy)
+        # pick exact pitch if either offset family is within 15%
+        if best_zero[0] <= v_fit * 1.15 and best_zero[0] <= best_fit[0] * 1.15:
+            return round(p_ex, 4), round(best_zero[1], 4)
+        if best_fit[0] <= v_fit * 1.15:
+            return round(p_ex, 4), round(best_fit[1], 4)
+        return p, o
+    w = gray.shape[1]
+    h = gray.shape[0]
+    px, ox = _snap(px, ox, w, True)
+    py, oy = _snap(py, oy, h, False)
+    # re-verify the gates at the refined (and possibly snapped) point
     r_fx, _o = _lattice_recall(epx, ewx, px)
     r_fy, _o = _lattice_recall(epy, ewy, py)
     ex_x = r_fx - _chance(px)
