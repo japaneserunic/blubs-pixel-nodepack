@@ -1,3 +1,5 @@
+# VERSION: v3.10.6-snapall (2026-08-19) -- measured on live run 01c8045328 (sasuke ref, 56f): v3.10.5's cap-45 kept 39%% of px as gen gradient mush (f0 379 unique colors / 60.7%% exact-ref; f30 1450 colors / 32.9%%) and the 25%%/min-4 rescue gate never fired on the eye glints (measured 11-17%% support = 4-6px in a 36px full-res window). (1) SNAP-ALL: when the run-level dual-read guard passes (gen matches the ref), EVERY opaque block snaps to the nearest ref color -- cap preset 45 -> 1e9 (adv_gn_snap_cap still takes an explicit cap for foreign-prop content). True 1:1 colors with the input. (2) RESCUE GATE: light-extreme support threshold 25%%/min-4 -> 10%%/min-3 -- recovers the eye glints and de-tints cyan-shaded white shirt cells (measured 8-39%% support on mush cells). Green sweep unchanged (0 green-dominant opaque px on all 56 keyed frames of 01c8045328).
+# PREV: v3.10.5-refsnap (2026-08-19) -- gen-native default-settings 1:1 push, measured on live run 2293e1bd04 (sasuke ref). (1) REF SNAP: with a ref armed (wired custom_palette_image or OneForge's auto-fed drawn_ref_image), the flattened native blocks snap onto the ref's EXACT modal palette (redmean argmin, cap 45 so foreign props keep gen colors; the v3.8.8 dual-read guard skips the snap on a foreign gen) -- kills the block-median gradient mush (f0: 704 unique colors in 927 opaque px, 4.6% on a ref color, median dist 19.3 -> 13 exact ref colors). (2) EXTREME RESCUE: the block median eats 2-3px light details (the eye glint: 1574 near-white px at keyed res -> 32 at grid res); a light-extreme ref color with >=25% support in a block's full-res window now wins the block. (3) GREEN SWEEP: post-keying, strongly green-dominant opaque px (G>R+25 & G>B+25) are keyed out when the ref palette carries no green (or refless when the screen itself was green) -- kills the detached/shadow-drifted green residue the border flood + temporal vote miss (f28-32: 400-1200 px/frame). New tail widgets adv_gn_green_sweep / adv_gn_ref_snap / adv_gn_snap_cap (preset = on; pf_oneforge passes no new keys -> presets apply, old workflows unaffected).
 # VERSION: v3.10.2-genartdensity (2026-08-19) -- gen-native mode now reduces the guard-kept Source grid to the ref ruler's pixel-art density (the v3.8.2 refdensity block geometry: block = char height px / ref char cells; masked majority-reduce straight from the full-res keyed frames) -- DENSITY ONLY: palette still quantized from the gen itself (Hi-bit), RefMatch still skipped. Owner verdict on live f4c6a9c0cf (gen-native kept the 176x176 native grid, char 63x137 cells): 'not 1:1 as its pixel art representation'. No ref wired -> keeps the guard-kept grid (unchanged). Legacy ref snap byte-path untouched (harness D: max|diff| 0 vs .bak_v3102). v3.10.1b-limbgate (limb rescue now gated to comps adjacent to the main subject -- painted ground shadows on keyed light fields were color-'rescued' = full-frame crops) + v3.10.1-autokey2 (2026-08-19) -- 'auto' chroma key samples the FULL BORDER RING and keys every dominant border color (was: corner median only -- run 20818cd458 white studio field 69% + green letterbox bars: corners landed in the bars, only green keyed, white field stayed opaque as 'content' = whole-frame crop, palette eaten by whites, limb-rescue kept 75,615 detached white px = 72.2s keying > 67.9s generate). One shared Lab per frame per pass; despill per key; report self-reports detected keys. v3.10.0 note: (2026-08-19) -- new tail widget adv_ref_look_mode (after adv_ref_backdrop): "Gen-native (1:1 with the H3 gen)" (DEFAULT) keeps the guard-kept Source grid and quantizes the palette from the gen itself via the Hi-bit/TruePixel engine -- refdensity's 1:1-with-ref halving (live 1bac01576b: size guard kept 176, refdensity forced 88, 99-100% ref palette, -67% edges vs the H3 source = "detailing way off from the H3 output") and RefMatch's ref-palette snap are SKIPPED. "Reference look (legacy ref snap)" = byte-identical pre-v3.10.0 behavior. pf_oneforge tail re-order (adv_ref_backdrop, adv_ref_look_mode) keeps v21 119-value workflows aligned (missing trailing value = default = Gen-native).
 # VERSION: v3.9.0-guardquorum (2026-08-19) -- the pooled dual-read ref guard false-tripped on live 6b7e1105f3 (Sasuke + a giant lavender sleeping bag: pooled core 27.2% / median 95.7 > 75 -> silent Hi-bit fallback at the guard-kept 176x176 Source grid = "density way too high, colors in wrong areas"). Now ALSO a per-frame quorum: pass when the pooled read passes OR >= 1/3 of frames individually pass (measured on all 9 preserved runs: matching quorum 46-100%, foreign f62d944eee/0e9d79c09e 0%). Also (pf_oneforge): v3.9.0-turbosteps clamps steps >8 -> 4 when a turbo LoRA is armed (288.8s -> ~100s generate).
 # VERSION: v3.8.8-guardcore+phases (2026-08-18) -- (1) the v3.8.7 median-only ref guard false-tripped on MATCHING gens with a big foreign prop (live e49f434bfa/0d79b30fd6: Sasuke + giant cake = median 62-63 > 60 -> silent Hi-bit fallback). Now dual-read: core-within-30 >= 27% AND median <= 75 (measured on all 7 preserved runs: matching core 32-43% / median 39-63, foreign core 1-23% / median 86-130). (2) phase self-report: every pipeline section emits pf_studio_phase + a console line, the node shows a live phase strip at its top, and section durations land in the forge report.
@@ -279,6 +281,12 @@ class PixelForgeSuperForge:
                                      "tooltip": "Reference look: fill the keyed backdrop with the ref's own dominant color (the source's simple flat backdrop) instead of leaving it transparent. preset = transparent (keyed bg, the pre-refmatch behavior); set on to bake the flat ref-color backdrop."}),
                 "adv_ref_look_mode": (list(_REF_LOOK_MODES), {"default": _REF_LOOK_MODE_GEN,
                                      "tooltip": "Reference look mode. Gen-native (default): the keyed H3 gen as true pixel art at its own native block grid -- GridRecover detects the gen's native blocks, every block becomes one flat median color (kills the anti-alias mush = hard pixels), colors + content 1:1 the gen's, no palette quantize / density ruler / RefMatch; border-only keying (no interior hole punches). Reference look (legacy): the pre-v3.10.0 ref snap (refdensity grid + RefMatch palette snap)."}),
+                "adv_gn_green_sweep": (_TRI, {"default": "preset",
+                                     "tooltip": "Gen-native: after keying, key out leftover green-dominant px (bg residue the border flood misses on some frames). Safe: only runs when the ref palette has no green, or refless when the screen itself was green. preset = on."}),
+                "adv_gn_ref_snap": (_TRI, {"default": "preset",
+                                     "tooltip": "Gen-native: snap every block to the armed ref's EXACT palette (kills the block-median gradient mush = true 1:1 colors with the input) + rescue tiny light details the median eats (eye glints). Guarded: a foreign gen keeps its own colors. preset = on when a ref is armed."}),
+                "adv_gn_snap_cap": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 200.0, "step": 1.0,
+                                     "tooltip": "Gen-native ref snap: max redmean distance a px may travel to a ref color; farther px keep the gen color. -1 = preset (snap ALL when the gen matches the ref; type e.g. 45 to let foreign props keep gen colors). Rescued extreme details always snap."}),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -309,6 +317,8 @@ class PixelForgeSuperForge:
             adv_crop_padding, adv_crop_snap, adv_loop_max_error, adv_loop_tail,
             adv_dedup_threshold, adv_ref_backdrop="preset",
             adv_ref_look_mode=_REF_LOOK_MODE_GEN,
+            adv_gn_green_sweep="preset", adv_gn_ref_snap="preset",
+            adv_gn_snap_cap=-1.0,
             alpha=None, custom_palette_image=None,
             target_layer="new layer", layer_name="",
             placement_x=0, placement_y=0,
@@ -476,6 +486,55 @@ class PixelForgeSuperForge:
         else:
             report.append("key: skipped (alpha wired in)")
             _keyed_here = False
+        # v3.10.5-greensweep (gen-native): the border flood + temporal vote
+        # leave shadow-drifted / detached green backdrop residue on some
+        # frames (measured on run 2293e1bd04: 400-1200 greenish opaque px
+        # on f28-32 AFTER keying). A strongly green-dominant px (G>R+25 &
+        # G>B+25) is backdrop/spill by definition when the ref sprite
+        # carries no green at all -- a cyan gi (#00D3FE) or blue hair fail
+        # the G>B gate and stay. Refless: only sweep when the detected
+        # screen itself was green-dominant.
+        if (_gennative and alpha is not None
+                and _tri(adv_gn_green_sweep, True)):
+            try:
+                _gs_ok = True
+                _gs_why = "ref palette has no green"
+                if custom_palette_image is not None:
+                    _rg0 = (custom_palette_image[0].clamp(0, 1) * 255
+                            ).round().to(torch.uint8).cpu().numpy()[..., :3]
+                    _p0, _b0, _k0, _a0 = _ref_palette(_rg0, colors)
+                    _all0 = np.array(
+                        [list(map(float, c)) for c in _p0]
+                        + [list(map(float, _b0))], dtype=np.float32)
+                    _gs_ok = not bool(((_all0[:, 1] > _all0[:, 0] + 25)
+                                       & (_all0[:, 1] > _all0[:, 2] + 25)
+                                       ).any())
+                else:
+                    _gs_ok = False
+                    _gs_why = "green screen"
+                    for _hx0 in (getattr(PixelForgeChromaKey,
+                                         "LAST_AUTO_KEYS", None) or []):
+                        _c0 = [int(_hx0[_j:_j + 2], 16)
+                               for _j in (1, 3, 5)]
+                        if _c0[1] > _c0[0] + 25 and _c0[1] > _c0[2] + 25:
+                            _gs_ok = True
+                if _gs_ok:
+                    _fa0 = (images.clamp(0, 1) * 255).cpu().numpy()
+                    _aa0 = alpha.cpu().numpy()
+                    _gm0 = ((_aa0 > 0.5)
+                            & (_fa0[..., 1] > _fa0[..., 0] + 25)
+                            & (_fa0[..., 1] > _fa0[..., 2] + 25))
+                    _ng0 = int(_gm0.sum())
+                    if _ng0:
+                        alpha = torch.from_numpy(np.where(
+                            _gm0, 0.0, _aa0).astype(np.float32)).to(
+                            alpha.device)
+                        report.append(
+                            f"green sweep: keyed {_ng0} leftover "
+                            f"green-dominant px batch-wide (bg residue; "
+                            f"{_gs_why})")
+            except Exception as _e:
+                report.append(f"green sweep: skipped ({_e})")
         capture("keyed", images, alpha, pixel_exact=False)
         # v3.8.2-refdensity: full-res keyed stash for the ref-density
         # reduce (the look branch reduces straight from here).
@@ -934,6 +993,155 @@ class PixelForgeSuperForge:
             report.append(
                 "look: gen-native flatten (native block grid, the gen's "
                 "own colors 1:1, no quantize)")
+            # v3.10.5-refsnap: snap the flattened blocks onto the ref's
+            # EXACT palette (integer-grid modal reduce, no kmeans). The
+            # block median keeps H3's per-pixel gradients (measured on run
+            # 2293e1bd04 f0: 704 unique colors in 927 opaque px, 4.6% on a
+            # ref color, median redmean 19.3 -- "bad color gradients that
+            # didn't exist on the source inputs"); after the snap every
+            # opaque block IS a ref color = true 1:1 with the input.
+            # Guarded by the v3.8.8 dual-read so a foreign gen keeps its
+            # own colors; px farther than the cap (foreign props) keep the
+            # gen color. Extreme rescue: a light-extreme ref color with
+            # >=25% support in a block's full-res window wins the block --
+            # the block median eats 2-3px light details (the eye glint:
+            # 1574 near-white px at keyed res -> 32 at grid res here).
+            if (custom_palette_image is not None
+                    and _tri(adv_gn_ref_snap, True)):
+                try:
+                    _ru = (custom_palette_image[0].clamp(0, 1) * 255
+                           ).round().to(torch.uint8).cpu().numpy()[..., :3]
+                    _pal_s, _bg_s, _k_s, _art_s = _ref_palette(_ru, colors)
+                    _spl = [list(map(float, c)) for c in _pal_s]
+                    _bgf = list(map(float, _bg_s))
+                    if _bgf not in _spl:
+                        _spl.append(_bgf)
+                    _SP = np.array(_spl, dtype=np.float32)
+                    _SPl = (_SP[:, 0] * 0.299 + _SP[:, 1] * 0.587
+                            + _SP[:, 2] * 0.114)
+                    _cap = _pick(adv_gn_snap_cap, 1.0e9)  # v3.10.6: preset = snap ALL (guard-gated)
+                    _nc = len(_SP)
+
+                    def _snap_idx(pxf):
+                        _rm = (pxf[:, :1] + _SP[None, :, 0]) / 2.0
+                        _d2 = ((2.0 + _rm / 256.0)
+                               * (pxf[:, :1] - _SP[None, :, 0]) ** 2
+                               + 4.0 * (pxf[:, 1:2] - _SP[None, :, 1]) ** 2
+                               + (2.0 + (255.0 - _rm) / 256.0)
+                               * (pxf[:, 2:3] - _SP[None, :, 2]) ** 2)
+                        return _d2.argmin(1), np.sqrt(_d2.min(1))
+
+                    _GA = (images.clamp(0, 1) * 255).cpu().numpy()
+                    _AA = alpha.cpu().numpy() if alpha is not None else None
+                    _gh2, _gw2 = _GA.shape[1], _GA.shape[2]
+                    _opx = []
+                    for _i in range(_GA.shape[0]):
+                        _m = (_AA[_i] > 0.5) if _AA is not None \
+                            else np.ones((_gh2, _gw2), bool)
+                        if _m.any():
+                            _opx.append(_GA[_i][_m])
+                    if not _opx:
+                        raise ValueError("no opaque px")
+                    _op = np.concatenate(_opx).astype(np.float32)
+                    if len(_op) > 200000:
+                        _op = _op[::len(_op) // 200000 + 1]
+                    _, _gd = _snap_idx(_op)
+                    _core = float((_gd < 30.0).mean() * 100.0)
+                    _gmed = float(np.median(_gd))
+                    if _core < 27.0 or _gmed > 75.0:
+                        report.append(
+                            f"ref snap: gen does not match the ref (core "
+                            f"{_core:.0f}% of px near a ref color, median "
+                            f"{_gmed:.0f}) -- keeping the gen's own colors")
+                    else:
+                        _out = _GA.copy()
+                        _moved = 0
+                        _kept = 0
+                        for _i in range(_GA.shape[0]):
+                            _m = (_AA[_i] > 0.5) if _AA is not None \
+                                else np.ones((_gh2, _gw2), bool)
+                            if not _m.any():
+                                continue
+                            _cur = _GA[_i][_m].astype(np.float32)
+                            _idx, _dist = _snap_idx(_cur)
+                            _far = _dist > _cap
+                            _new = np.where(_far[:, None], _cur, _SP[_idx])
+                            _kept += int(_far.sum())
+                            _moved += int((np.abs(_new - _cur).max(-1)
+                                           > 0.5).sum())
+                            _f = _out[_i]
+                            _f[_m] = _new
+                            _out[_i] = _f
+                        # --- extreme-minority rescue (eye glints) ---
+                        # Vote palette labels over each block's FULL-RES
+                        # keyed window; a light-extreme ref color (palette
+                        # max luminance family) with >=25% support wins the
+                        # block even as a minority. Only fires into blocks
+                        # that aren't already light (no highlight speckle).
+                        _resc = 0
+                        _fim, _fam = _keyed_full
+                        _xL = float(_SPl.max())
+                        _xidx = [int(_j) for _j in range(_nc)
+                                 if _SPl[_j] >= _xL - 12.0]
+                        if (_fim is not None and _fam is not None
+                                and _xidx and _nc > 1):
+                            _FI = (_fim.clamp(0, 1) * 255).cpu().numpy()
+                            _FA = _fam.cpu().numpy()
+                            _nf = min(_FI.shape[0], _GA.shape[0])
+                            _hf, _wf = _FI.shape[1], _FI.shape[2]
+                            _sy = _hf / float(_gh2)
+                            _sx = _wf / float(_gw2)
+                            _ys, _xs = np.mgrid[0:_hf, 0:_wf]
+                            _cy = np.minimum(
+                                (_ys / _sy).astype(np.int32), _gh2 - 1)
+                            _cx = np.minimum(
+                                (_xs / _sx).astype(np.int32), _gw2 - 1)
+                            _cell = (_cy * _gw2 + _cx).ravel()
+                            _xarr = np.array(_xidx, dtype=np.int64)
+                            for _i in range(_nf):
+                                _m = (_AA[_i] > 0.5) if _AA is not None \
+                                    else np.ones((_gh2, _gw2), bool)
+                                if not _m.any():
+                                    continue
+                                _lab, _ = _snap_idx(
+                                    _FI[_i].reshape(-1, 3).astype(
+                                        np.float32))
+                                _opm = (_FA[_i] > 0.5).ravel()
+                                _lin = _cell * _nc + _lab
+                                _cnt = np.bincount(
+                                    _lin[_opm], minlength=_gh2 * _gw2 * _nc)
+                                _cnt = _cnt.reshape(_gh2, _gw2, _nc)
+                                _tot = _cnt.sum(-1)
+                                _xc = _cnt[..., _xidx]
+                                _xsup = _xc.max(-1)
+                                _xbest = _xarr[_xc.argmax(-1)]
+                                _f = _out[_i]
+                                _cl = (_f[..., 0] * 0.299
+                                       + _f[..., 1] * 0.587
+                                       + _f[..., 2] * 0.114)
+                                _fire = (_m & (_tot > 0)
+                                         & (_xsup >= np.maximum(
+                                             3, 0.10 * _tot))  # v3.10.6
+                                         & (_cl <= _xL - 40.0))
+                                if _fire.any():
+                                    _f[_fire] = _SP[_xbest[_fire]]
+                                    _out[_i] = _f
+                                    _resc += int(_fire.sum())
+                        images = torch.from_numpy(
+                            (_out / 255.0).astype(np.float32)).to(
+                            images.device)
+                        grid_frames = images
+                        report.append(
+                            f"ref snap: gen-native snapped to the ref's "
+                            f"exact {_nc}-color palette ({_moved} px "
+                            f"moved, {_kept} beyond cap {_cap:.0f} kept "
+                            f"gen color; guard core {_core:.0f}% median "
+                            f"{_gmed:.0f})"
+                            + (f" | extreme rescue: {_resc} detail "
+                               "blocks (eye glints / speculars)"
+                               if _resc else ""))
+                except Exception as _e:
+                    report.append(f"ref snap: skipped ({_e})")
         elif look.startswith("Hi-bit"):
             cel = look == "Hi-bit cel shading"
             # v3.7.4-looktune: retuned on the REAL 56-frame Sasuke run (uid
