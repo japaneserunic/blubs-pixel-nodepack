@@ -73,8 +73,8 @@
 // reap it once it has lingered > 1s, and release the body scroll lock when no
 // overlay masks remain. Legit masks are removed by PrimeVue within ~300ms, so
 // the grace window never touches live UI.
-console.info("[PixelForge] pf_studio v3.10.6-snapall — gen-native snap-ALL to ref palette + eye-glint rescue 10% (py v3.10.6)");
-const PFS_VERSION = "v3.10.6-snapall";
+console.info("[PixelForge] pf_studio v3.10.7-snapalways - gen-native ref snap ALWAYS (guard trip = WARN only; explicit on = guarded) (py v3.10.7) — gen-native snap-ALL to ref palette + eye-glint rescue 10% (py v3.10.6)");
+const PFS_VERSION = "v3.10.7-snapalways";
 // --- self-report probe (v3.5.3-probe): the suite phones pointer forensics home
 // to OUR backend (POST /pixelforge/probe -> _probe_log.jsonl) so diagnosing the
 // owner's live tab needs NOTHING from him but normal use. Batched + fire-and-
