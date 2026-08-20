@@ -1,3 +1,4 @@
+# VERSION: v3.10.8-fracgrid (2026-08-19) -- pixel PLACEMENT fix: H3 renders the drawn pixel grid at a FRACTIONAL pitch when imitating a ref's cell count (live run 4788d88fa5: 704px gen, ref 820x721 @ 10px blocks = 82 cells -> true pitch 704/82 = 8.585; integer s=9 detection drifted ~0.46px/cell = art pixels one cell off near the edges; within-cell std 3.81 vs 0.74, edge recall 0.51 vs 0.995). GridRecover auto now refines to the fractional lattice (energy-weighted edge recall, both-axes gate >= 0.60 and >= 1.35x the integer recall; per-frame phase measured as noise -> global lattice) and reduces with area-weighted masked trimmed means on the true cell windows. Integer path untouched when no fractional lattice is proven (control run 7acc0e3dc1: gate 1.22x < 1.35x). v3.10.8b: the never-live v3.10.8 raw-recall scan crowned a degenerate p=3.0 comb on live run 10fb29c43f (recall 1.000 on a gen with NO global lattice = 234x234 grid); candidates now score by EXCESS over chance coverage 2*tol/p (true lattice +0.67..+0.72, false fine combs +0.04..+0.40, no-lattice gen +0.34; gate >= 0.45 both axes) + the pf_grid frac sanity gate read the X offset from the Y tuple slot (fixed). v3.10.8c: the recall tol plateau placed cells with median err 11/13.8% off on ground-truth synthetic (detector is not a fitter) -- after the excess gates pass, pitch+phase are now FIT by minimizing alpha-weighted within-cell variance (Gauss-Seidel, bincount stats, cheap-gates-first so integer/no-lattice gens never pay). FINAL: the reduce is pixel-CENTER assigned with the integer path's median-anchored trimmed mean per cell -- the area-weighted mean from the never-live a-c iterations mixed 6-12% neighbor color into every cell (measured median err 9 on a perfect ground-truth frame; center-assigned: 0).
 # VERSION: v3.10.7-snapalways (2026-08-19) -- owner 21:18: 'why is there still a million gradients in the output' on live run 29f130e30a (v23, no LoRA, fresh seed): the gen drifted far off-palette (0%% exact-ref px, median redmean 61-125 across frames) -> the v3.8.8 guard tripped -> look == grid passthrough (3,580 unique colors at f0, ZERO color consolidation). Preset now snaps ALWAYS when a ref is armed (guard trip downgraded to a loud WARN line); explicit adv_gn_ref_snap=on keeps the legacy guard-gated mode, off = never. Color mapping is deterministic per color, so always-snap stays temporally consistent across frames.
 # PREV: v3.10.6-snapall (2026-08-19) -- measured on live run 01c8045328 (sasuke ref, 56f): v3.10.5's cap-45 kept 39%% of px as gen gradient mush (f0 379 unique colors / 60.7%% exact-ref; f30 1450 colors / 32.9%%) and the 25%%/min-4 rescue gate never fired on the eye glints (measured 11-17%% support = 4-6px in a 36px full-res window). (1) SNAP-ALL: when the run-level dual-read guard passes (gen matches the ref), EVERY opaque block snaps to the nearest ref color -- cap preset 45 -> 1e9 (adv_gn_snap_cap still takes an explicit cap for foreign-prop content). True 1:1 colors with the input. (2) RESCUE GATE: light-extreme support threshold 25%%/min-4 -> 10%%/min-3 -- recovers the eye glints and de-tints cyan-shaded white shirt cells (measured 8-39%% support on mush cells). Green sweep unchanged (0 green-dominant opaque px on all 56 keyed frames of 01c8045328).
 # PREV: v3.10.5-refsnap (2026-08-19) -- gen-native default-settings 1:1 push, measured on live run 2293e1bd04 (sasuke ref). (1) REF SNAP: with a ref armed (wired custom_palette_image or OneForge's auto-fed drawn_ref_image), the flattened native blocks snap onto the ref's EXACT modal palette (redmean argmin, cap 45 so foreign props keep gen colors; the v3.8.8 dual-read guard skips the snap on a foreign gen) -- kills the block-median gradient mush (f0: 704 unique colors in 927 opaque px, 4.6% on a ref color, median dist 19.3 -> 13 exact ref colors). (2) EXTREME RESCUE: the block median eats 2-3px light details (the eye glint: 1574 near-white px at keyed res -> 32 at grid res); a light-extreme ref color with >=25% support in a block's full-res window now wins the block. (3) GREEN SWEEP: post-keying, strongly green-dominant opaque px (G>R+25 & G>B+25) are keyed out when the ref palette carries no green (or refless when the screen itself was green) -- kills the detached/shadow-drifted green residue the border flood + temporal vote miss (f28-32: 400-1200 px/frame). New tail widgets adv_gn_green_sweep / adv_gn_ref_snap / adv_gn_snap_cap (preset = on; pf_oneforge passes no new keys -> presets apply, old workflows unaffected).
@@ -558,14 +559,29 @@ class PixelForgeSuperForge:
             src_grid = (gw, gh)
             try:
                 _gi = json.loads(ginfo)
-                report.append(
-                    ("grid: native " if _gennative else "grid: ")
-                    + f"{gw}x{gh} (block {_gi.get('block')} @ "
-                    f"{tuple(_gi.get('offset', [0, 0]))}"
-                    f"{'' if _gi.get('auto_detected') else ', manual'}"
-                    + (", gen-native flatten: every native block -> one "
-                       "flat median color, the gen's own colors 1:1)"
-                       if _gennative else ")"))
+                if _gi.get("fractional"):
+                    _pit = _gi.get("pitch", [0.0, 0.0])
+                    _fo = _gi.get("frac_offset", [0.0, 0.0])
+                    _er = _gi.get("edge_recall", [0.0, 0.0])
+                    _ex = _gi.get("edge_excess", 0.0)
+                    report.append(
+                        ("grid: native " if _gennative else "grid: ")
+                        + f"{gw}x{gh} (FRAC pitch {_pit[0]:.2f}x"
+                        f"{_pit[1]:.2f} @ ({_fo[0]:.1f},{_fo[1]:.1f}), "
+                        f"edge recall {_er[0]:.2f} vs int {_er[1]:.2f}, "
+                        f"excess {_ex:.2f}"
+                        + (", gen-native flatten: every native block -> one "
+                           "flat median color, the gen's own colors 1:1)"
+                           if _gennative else ")"))
+                else:
+                    report.append(
+                        ("grid: native " if _gennative else "grid: ")
+                        + f"{gw}x{gh} (block {_gi.get('block')} @ "
+                        f"{tuple(_gi.get('offset', [0, 0]))}"
+                        f"{'' if _gi.get('auto_detected') else ', manual'}"
+                        + (", gen-native flatten: every native block -> one "
+                           "flat median color, the gen's own colors 1:1)"
+                           if _gennative else ")"))
             except Exception:
                 report.append(f"grid: {gw}x{gh}")
         else:

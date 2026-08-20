@@ -9,11 +9,13 @@ art grid (majority/median/nearest per block), and hands downstream nodes clean
 """
 
 import json
+import warnings
 
 import numpy as np
 import torch
 
-from .pf_finalize import _detect_pixel_grid
+from .pf_finalize import (_detect_pixel_grid,
+                          _detect_pixel_grid_frac)
 
 
 def _to_np(images):
@@ -98,6 +100,70 @@ def _reduce_blocks_masked(crop, amask, s, mode):
     return out
 
 
+
+
+def _reduce_blocks_frac(frame, amask, px, py, ox, oy, mode="median"):
+    """Reduce (H,W,3) uint8 onto a FRACTIONAL lattice -- the integer
+    masked path's semantics generalized to fractional cell windows.
+    Every source pixel is assigned to exactly ONE cell by pixel-center
+    (cell k covers [o+k*p, o+(k+1)*p) in edge coords; pixel x covers
+    [x, x+1)); cell color = median-anchored trimmed mean of its OPAQUE
+    pixels (median-anchored windows cut SYMMETRIC noise slices and drop
+    the boundary-straddler columns/rows; an area-weighted MEAN instead
+    mixes 6-12% of each neighbor's color into every cell -- measured on
+    a ground-truth p=8.585 lattice: median cell err 9 even on a PERFECT
+    blur-free frame, 14 with blur+noise; center-assigned: 0 and ~1).
+    Cells with no opaque pixel fall back to the plain reduce (their
+    alpha is 0, color irrelevant). Cell alpha = opaque majority of the
+    assigned pixels, same rule as the integer path. Complete cells only
+    (the ragged margin is dropped, same as the integer crop). Returns
+    (rgb uint8 (gh,gw,3), alpha float32 (gh,gw))."""
+    h, w = frame.shape[:2]
+    nx = int((w - ox) // px)
+    ny = int((h - oy) // py)
+    if nx < 4 or ny < 4:
+        raise ValueError("fractional lattice too fine for the frame")
+    kx = np.floor((np.arange(w) + 0.5 - ox) / px).astype(np.int64)
+    ky = np.floor((np.arange(h) + 0.5 - oy) / py).astype(np.int64)
+    x0 = int(np.searchsorted(kx, 0))
+    x1 = int(np.searchsorted(kx, nx))
+    y0 = int(np.searchsorted(ky, 0))
+    y1 = int(np.searchsorted(ky, ny))
+    k = (ky[y0:y1, None] * nx + kx[None, x0:x1]).ravel()
+    n = ny * nx
+    cnt = np.bincount(k, minlength=n)
+    maxc = int(cnt.max())
+    order = np.argsort(k, kind="stable")
+    starts = np.zeros(n, np.int64)
+    np.cumsum(cnt[:-1], out=starts[1:])
+    ks = k[order]
+    pos = np.arange(ks.shape[0]) - starts[ks]
+    f = frame[y0:y1, x0:x1].reshape(-1, 3).astype(np.float32)[order]
+    buf = np.full((n, maxc, 3), np.nan, np.float32)
+    buf[ks, pos] = f
+    if amask is None:
+        a = np.ones((h, w), np.float32)
+    else:
+        a = amask.astype(np.float32)
+    amap = np.zeros((n, maxc), np.float32)
+    amap[ks, pos] = a[y0:y1, x0:x1].reshape(-1)[order]
+    opaque = amap > 0.5
+    widths = (8.0,) if mode in ("median", "nearest") else (12.0, 8.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean = _trimmed_mean(np.where(opaque[..., None], buf, np.nan),
+                             widths)
+        plain = _trimmed_mean(buf, widths)
+    cnt_op = opaque.sum(1)
+    none = cnt_op == 0
+    if none.any():
+        mean[none] = plain[none]
+    cell_a = cnt_op / np.maximum(cnt, 1)
+    rgb = np.clip(np.round(mean), 0, 255).astype(np.uint8)
+    return (rgb.reshape(ny, nx, 3),
+            (cell_a > 0.5).astype(np.float32).reshape(ny, nx))
+
+
 class PixelForgeGridRecover:
     """Recover the TRUE pixel grid H3 rendered, before pixelizing.
 
@@ -153,8 +219,14 @@ class PixelForgeGridRecover:
         n, h, w, _ = arr.shape
         info = {"source_size": [w, h], "reduce": reduce, "mode": mode}
 
+        am = None
+        if alpha is not None:
+            m = alpha.cpu().numpy()
+            am = [np.clip(m[min(i, m.shape[0] - 1)], 0, 1) for i in range(n)]
+
         s, ox, oy = 1, 0, 0
         auto_detected = False
+        frac = None
         if mode == "auto":
             probe = np.median(arr[:min(8, n)].astype(np.float32),
                               axis=0).astype(np.uint8)
@@ -162,6 +234,23 @@ class PixelForgeGridRecover:
             if det is not None:
                 s, ox, oy = det
                 auto_detected = True
+                # v3.10.8-fracgrid: H3 can render its drawn pixel grid at a
+                # NON-integer pitch (live run 4788d88fa5: 704px gen
+                # imitating an 82-cell ref -> true pitch 8.585; the integer
+                # s=9 grid drifted ~0.46px/cell off the drawn boundaries =
+                # art pixels one cell off near the edges). Refine to the
+                # fractional lattice when edge recall proves it on BOTH
+                # axes; otherwise keep the integer grid unchanged.
+                _a_probe = None
+                if am is not None:
+                    _a_probe = np.median(
+                        np.stack(am[:min(8, n)]).astype(np.float32), axis=0)
+                _det_f = _detect_pixel_grid_frac(probe, s, alpha=_a_probe)
+                if _det_f is not None:
+                    _gwf = int((w - _det_f[2]) // _det_f[0])
+                    _ghf = int((h - _det_f[3]) // _det_f[1])
+                    if _gwf >= 8 and _ghf >= 8:
+                        frac = _det_f
         if not auto_detected:
             s = manual_block
             if mode == "auto":
@@ -170,11 +259,16 @@ class PixelForgeGridRecover:
         info["auto_detected"] = bool(auto_detected)
         info["block"] = int(s)
         info["offset"] = [int(ox), int(oy)]
-
-        am = None
-        if alpha is not None:
-            m = alpha.cpu().numpy()
-            am = [np.clip(m[min(i, m.shape[0] - 1)], 0, 1) for i in range(n)]
+        if frac is not None:
+            info["fractional"] = True
+            info["pitch"] = [round(float(frac[0]), 4),
+                             round(float(frac[1]), 4)]
+            info["frac_offset"] = [round(float(frac[2]), 3),
+                                   round(float(frac[3]), 3)]
+            info["edge_recall"] = [round(float(frac[4]), 3),
+                                   round(float(frac[5]), 3)]
+            info["edge_excess"] = round(float(frac[6]), 3)
+            info["block"] = int(round((frac[0] + frac[1]) / 2.0))
 
         if s <= 1:
             gw, gh = w, h
@@ -184,6 +278,44 @@ class PixelForgeGridRecover:
             info.update({"grid_size": [gw, gh], "note": "passthrough (block=1)"})
             return (_to_tensor(out_rgb), torch.from_numpy(out_a), gw, gh,
                     json.dumps(info))
+
+        if frac is not None:
+            _fpx, _fpy, _fox, _foy = frac[0], frac[1], frac[2], frac[3]
+            gw = int((w - _fox) // _fpx)
+            gh = int((h - _foy) // _fpy)
+            small = np.empty((n, gh, gw, 3), dtype=np.uint8)
+            small_a = np.empty((n, gh, gw), dtype=np.float32)
+            for i in range(n):
+                _ai = None
+                if am is not None:
+                    _ai = am[i]
+                    if _ai.shape != (h, w):
+                        from PIL import Image
+                        _ai = np.asarray(
+                            Image.fromarray((_ai * 255).astype(np.uint8))
+                            .resize((w, h), Image.Resampling.NEAREST),
+                            dtype=np.float32) / 255.0
+                small[i], small_a[i] = _reduce_blocks_frac(
+                    arr[i], _ai, _fpx, _fpy, _fox, _foy, mode=reduce)
+            out_rgb, out_a = small, small_a
+            if restore_size:
+                _si = int(round((_fpx + _fpy) / 2.0))
+                out_rgb = np.repeat(np.repeat(small, _si, axis=1),
+                                    _si, axis=2)
+                out_a = np.repeat(np.repeat(small_a, _si, axis=1),
+                                  _si, axis=2)
+            info.update({"grid_size": [gw, gh],
+                         "output_size": [int(out_rgb.shape[2]),
+                                         int(out_rgb.shape[1])],
+                         "restore_size": bool(restore_size)})
+            print("[PixelForgeGridRecover] auto: FRAC lattice "
+                  "%.3fx%.3f px/cell @ (%.2f,%.2f) -> %dx%d true grid "
+                  "(edge recall %.2f vs int %.2f, excess %.2f)"
+                  % (_fpx, _fpy, _fox, _foy, gw, gh,
+                     frac[4], frac[5], frac[6]))
+            return (_to_tensor(out_rgb),
+                    torch.from_numpy(out_a.astype(np.float32)),
+                    gw, gh, json.dumps(info))
 
         new_w = s * ((w - ox) // s)
         new_h = s * ((h - oy) // s)

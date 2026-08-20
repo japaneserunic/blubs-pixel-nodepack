@@ -336,6 +336,198 @@ def _detect_pixel_grid(frame_rgb, s_min=2, s_max=10):
     return s, ox, oy
 
 
+def _edge_peaks_1d(prof, pct=88.0):
+    """Sub-px gradient-peak positions (pixel-EDGE coords: diff index i =
+    boundary at i+1) + energies."""
+    n = len(prof)
+    if n < 8:
+        return np.zeros(0), np.zeros(0)
+    thr = np.percentile(prof, pct)
+    pos, en = [], []
+    for i in range(1, n - 1):
+        if prof[i] >= thr and prof[i] >= prof[i - 1] \
+                and prof[i] >= prof[i + 1]:
+            d = prof[i - 1] - 2.0 * prof[i] + prof[i + 1]
+            off = 0.5 * (prof[i - 1] - prof[i + 1]) / d if d > 1e-9 else 0.0
+            pos.append(i + 1.0 + float(np.clip(off, -0.5, 0.5)))
+            en.append(float(prof[i]))
+    return np.array(pos), np.array(en)
+
+
+def _lattice_recall(ep, ew, p, tol=1.2, nph=160):
+    """Energy-weighted edge recall of the lattice o + k*p, best phase.
+    Fraction of gradient-peak energy landing within tol of a lattice
+    boundary. True drawn grid -> ~1.0; wrong pitch drifts off the edges."""
+    if len(ep) < 8:
+        return 0.0, 0.0
+    tot = float(ew.sum())
+    if tot <= 0:
+        return 0.0, 0.0
+    best_r, best_o = 0.0, 0.0
+    for o in np.linspace(0, p, nph, endpoint=False):
+        k = np.round((ep - o) / p)
+        on = np.abs(ep - (o + k * p)) <= tol
+        r = float(ew[on].sum()) / tot
+        if r > best_r:
+            best_r, best_o = r, float(o)
+    return best_r, best_o
+
+
+def _within_cell_std(gray, wgt, px, ox, py, oy):
+    """Alpha-weighted within-cell luminance std of the lattice (the
+    PLACEMENT objective: flat drawn cells -> minimum at the true
+    pitch+phase; measured 0.74 true vs 3.81 integer on live 4788d88fa5).
+    Bincount stats, complete cells only, ~ms per candidate."""
+    h, wd = gray.shape
+    nx = int((wd - ox) // px)
+    ny = int((h - oy) // py)
+    if nx < 4 or ny < 4:
+        return 1e18
+    kx = np.floor((np.arange(wd) + 0.5 - ox) / px).astype(np.int64)
+    ky = np.floor((np.arange(h) + 0.5 - oy) / py).astype(np.int64)
+    mx = (kx >= 0) & (kx < nx)
+    my = (ky >= 0) & (ky < ny)
+    if not mx.any() or not my.any():
+        return 1e18
+    g = gray[np.ix_(my, mx)]
+    w = wgt[np.ix_(my, mx)]
+    k = (ky[my][:, None] * nx + kx[mx][None, :]).ravel()
+    n = ny * nx
+    wf = w.ravel()
+    gf = g.ravel()
+    sw = np.bincount(k, weights=wf, minlength=n)
+    s1 = np.bincount(k, weights=wf * gf, minlength=n)
+    s2 = np.bincount(k, weights=wf * gf * gf, minlength=n)
+    d = np.maximum(sw, 1e-6)
+    var = np.maximum(s2 / d - (s1 / d) ** 2, 0.0)
+    tw = float(sw.sum())
+    if tw <= 0:
+        return 1e18
+    return float(np.sqrt(float((var * sw).sum()) / tw))
+
+
+def _detect_pixel_grid_frac(frame_rgb, s_hint, alpha=None):
+    """Fractional lattice refinement around an integer detection.
+
+    H3 can render its drawn pixel grid at a NON-integer pitch (live run
+    4788d88fa5: 704px gen imitating an 82-cell-wide ref -> true pitch
+    704/82 = 8.585; the integer s=9 grid sat 0.46px/cell off the drawn
+    boundaries -> art pixels one cell off near the edges; within-cell std
+    3.81 vs 0.74 at the true lattice; edge recall 0.51 vs 0.995).
+
+    Two objectives, two jobs: (1) DETECT -- scan fine pitch windows
+    around s_hint, 2*s_hint and s_hint/2, scoring candidates by EXCESS
+    edge recall over the chance coverage 2*tol/p (raw recall crowns
+    degenerate fine combs: a p=3.0 comb scored recall 1.000 on live
+    10fb29c43f which has NO global lattice; excess +0.20 vs +0.67..+0.72
+    for true lattices). (2) FIT -- Gauss-Seidel minimize _within_cell_std
+    over pitch (+-0.06) and phase (+-1.3) around the winner (the recall
+    tol plateau is ~2px wide: unrefined winners placed cells with median
+    color err 11 vs 3.9 refined on ground-truth synthetic). Cheap gates
+    first, so gens without a proven fractional lattice never pay for the
+    fit. Acceptance, BOTH axes, at the refined point: recall >= 0.60,
+    excess >= 0.45, recall >= 1.35x the integer recall; axis pitch match
+    within 4%.
+
+    Returns (px, py, ox, oy, recall_frac, recall_int, min_excess) or
+    None -> caller keeps the integer grid."""
+    gray = _luminance(frame_rgb.astype(np.float32))
+    if alpha is not None:
+        a = alpha.astype(np.float32)
+        wx = 0.5 * (a[:, 1:] + a[:, :-1])
+        gx = (np.abs(np.diff(gray, axis=1)) * wx).sum(0) / \
+            np.maximum(wx.sum(0), 1e-6)
+        wy = 0.5 * (a[1:, :] + a[:-1, :])
+        gy = (np.abs(np.diff(gray, axis=0)) * wy).sum(1) / \
+            np.maximum(wy.sum(1), 1e-6)
+        wgt = a
+    else:
+        gx = np.abs(np.diff(gray, axis=1)).sum(0)
+        gy = np.abs(np.diff(gray, axis=0)).sum(1)
+        wgt = np.ones_like(gray)
+
+    def _chance(p, tol=1.2):
+        return min(1.0, 2.0 * tol / p)
+
+    def _scan(prof):
+        ep, ew = _edge_peaks_1d(prof)
+        if len(ep) < 16 or float(ew.sum()) <= 0:
+            return None
+        cand = set()
+        for base in (float(s_hint), 2.0 * s_hint, 0.5 * s_hint):
+            lo = max(2.5, base - 1.25)
+            hi = min(16.0, base + 1.25)
+            p = lo
+            while p <= hi + 1e-9:
+                cand.add(round(p, 3))
+                p += 0.025
+        scored = []
+        for p in sorted(cand):
+            r, _o = _lattice_recall(ep, ew, p)
+            if r > 0:
+                scored.append((r - _chance(p), r, p))
+        if not scored:
+            return None
+        ex_best = max(t[0] for t in scored)
+        pool = [t for t in scored if t[0] >= 0.98 * ex_best]
+        p_f = max(pool, key=lambda t: t[2])[2]
+        r_f, o_f = _lattice_recall(ep, ew, p_f, nph=240)
+        r_int, _oi = _lattice_recall(ep, ew, float(s_hint))
+        return p_f, o_f, r_f, r_f - _chance(p_f), r_int, ep, ew
+
+    def _gates(r_f, ex_f, r_int, p):
+        return (r_f >= 0.60 and ex_f >= 0.45
+                and r_f >= 1.35 * max(r_int, 1e-6))
+
+    sx = _scan(gx)
+    sy = _scan(gy)
+    if sx is None or sy is None:
+        return None
+    p_fx, o_fx, r_fx, ex_x, r_ix, epx, ewx = sx
+    p_fy, o_fy, r_fy, ex_y, r_iy, epy, ewy = sy
+    # cheap gates at the recall winner FIRST -- no proven fractional
+    # lattice -> integer path, no fitting cost
+    if abs(p_fx - p_fy) / max(min(p_fx, p_fy), 1e-6) > 0.04:
+        return None
+    if not (_gates(r_fx, ex_x, r_ix, p_fx)
+            and _gates(r_fy, ex_y, r_iy, p_fy)):
+        return None
+
+    # FIT: placement-exact pitch+phase via within-cell variance
+    # (Gauss-Seidel: x with y at the winner, then y with x refined)
+    def _refine(p0, o0, p_fix, o_fix, move_x):
+        best = None
+        p = max(2.5, p0 - 0.06)
+        while p <= p0 + 0.0601:
+            o = o0 - 1.3
+            while o <= o0 + 1.301:
+                if move_x:
+                    v = _within_cell_std(gray, wgt, p, o, p_fix, o_fix)
+                else:
+                    v = _within_cell_std(gray, wgt, p_fix, o_fix, p, o)
+                if best is None or v < best[0]:
+                    best = (v, round(p, 4), round(o, 4))
+                o += 0.125
+            p += 0.005
+        return best[1], best[2]
+
+    px, ox = _refine(p_fx, o_fx, p_fy, o_fy, True)
+    py, oy = _refine(p_fy, o_fy, px, ox, False)
+    # re-verify the gates at the refined point
+    r_fx, _o = _lattice_recall(epx, ewx, px)
+    r_fy, _o = _lattice_recall(epy, ewy, py)
+    ex_x = r_fx - _chance(px)
+    ex_y = r_fy - _chance(py)
+    if abs(px - py) / max(min(px, py), 1e-6) > 0.04:
+        return None
+    if not (_gates(r_fx, ex_x, r_ix, px)
+            and _gates(r_fy, ex_y, r_iy, py)):
+        return None
+    return (px, py, ox, oy,
+            0.5 * (r_fx + r_fy), 0.5 * (r_ix + r_iy),
+            min(ex_x, ex_y))
+
+
 # ---------------------------------------------------------------------------
 # cel-band shading (port of flattenTexture preserveHue mode)
 
