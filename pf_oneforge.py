@@ -133,6 +133,18 @@ def _vae_list():
         return []
 
 
+def _sf_vae_list():
+    """Single-frame (T=1) H3 VAE decoders in models/vae, "none" first."""
+    try:
+        files = folder_paths.get_filename_list("vae")
+    except Exception:
+        files = []
+    def _is_sf(name):
+        c = "".join(ch for ch in name.lower() if ch.isalnum())
+        return "singleframe" in c
+    return ["none"] + [f for f in files if _is_sf(f)]
+
+
 def _lora_list():
     try:
         return ["none"] + folder_paths.get_filename_list("loras")
@@ -332,9 +344,10 @@ class PixelForgeOneForge:
     FUNCTION = "run"
     OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "MASK", "STRING", "STRING", "STRING",
-                    "IMAGE", "IMAGE", "STRING")
+                    "IMAGE", "IMAGE", "STRING", "STRING")
     RETURN_NAMES = ("images", "alpha", "durations_json", "palette_json",
-                    "forge_report", "frames", "sheet", "export_report")
+                    "forge_report", "frames", "sheet", "export_report",
+                    "prompt_preview")
     DESCRIPTION = ("The whole stack in one node: H3 loaders + turbo LoRA + "
                    "ref2va conditioning + sampler + forge pipeline + "
                    "GIF/sheet/aseprite export. All controls live in the suite "
@@ -400,6 +413,12 @@ class PixelForgeOneForge:
             "ffn_chunks": ("INT", {"default": 33, "min": 1, "max": 64,
                            "tooltip": "Chunk the H3 feedforward to cut peak VRAM. 1 = off."}),
             "ffn_seq_threshold": ("INT", {"default": 4096, "min": 256, "max": 262144, "step": 256}),
+            # v3.11.1: expose the full assembled prompt for tweaking.
+            "system_prompt": ("STRING", {"multiline": True, "default": "",
+                              "tooltip": "Extra prompt text appended to the built H3 prompt. "
+                                         "Use this to add custom clauses (lighting, mood, camera, "
+                                         "negative hints) without editing the character/action fields. "
+                                         "Empty = no change."}),
         }
         export = {
             "filename_prefix": ("STRING", {"default": "pixelforge/sprite",
@@ -455,6 +474,17 @@ class PixelForgeOneForge:
         required.update(gen)
         required.update(forge_required)
         required.update(export)
+        # v3.11.7-singleframe: optional single-frame (T=1) VAE. Inserted
+        # right before the backdrop/look_mode tail re-append so it
+        # serializes at def position 120 -- byte-matching the def the
+        # v3.11.6 frontend (syncSingleFrameVAE) arms in single/range gen
+        # modes. "none" = unchanged behavior (video VAE decodes).
+        required["single_frame_vae"] = (_sf_vae_list(), {
+            "default": "none",
+            "tooltip": "Optional single-frame VAE for independent frame decoding. "
+                       "When set, the normal video VAE handles encoding/ref2va; the "
+                       "single-frame VAE decodes each latent slice independently. "
+                       "Required for true 1-frame generation without temporal coupling."})
         # v3.8.0b: adv_ref_backdrop MUST serialize last (widget-value
         # alignment) - a mid-list widget breaks every saved OneForge
         # workflow (the 2026-08-18 v11 queue-validation failure).
@@ -503,10 +533,11 @@ class PixelForgeOneForge:
             seed, steps, sampler_name, scheduler, tail_compress,
             temporal_blend, loop_noise, edge_commit,
             attention_backend, ffn_chunks, ffn_seq_threshold,
+            system_prompt,
             filename_prefix, export_fps, make_gif, gif_size, make_sheet,
             sheet_columns, sheet_bg, build_aseprite, aseprite_path,
             drawn_ref_image="", drawn_ref_image_2="", ref_video_1="",
-            prompt_segments="[]", gen_win_start=0,
+            prompt_segments="[]", gen_win_start=0, single_frame_vae="none",
             images=None, first_frame=None, ref_image_2=None,
             alpha=None, custom_palette_image=None,
             unique_id=None, **forge):
@@ -544,7 +575,8 @@ class PixelForgeOneForge:
             _ref_bg = _ref_flat_hex(forge)
             prompt = PixelForgeH3Prompt._build(
                 character, action, style, "side",
-                clause_for_hex(_ref_bg) + ".", seamless_loop, "")
+                clause_for_hex(_ref_bg) + ".", seamless_loop,
+                system_prompt or "")
             length = PixelForgeH3Prompt.snap_frames(seconds)
             _pfps = _H3_FPS
             log_lines.append(f"backdrop: {_ref_bg} (prompt/ref/key synced)")
@@ -712,7 +744,18 @@ class PixelForgeOneForge:
                 latent_image=latent))[0]
 
             print("[OneForge] decoding…", flush=True)
-            images = _core_nodes.VAEDecode().decode(vae, sampled)[0]
+            # v3.11.7-singleframe: armed single-frame VAE decodes each
+            # latent slice independently (no temporal coupling) — the
+            # true-1-frame path for single/range regen. Encoding and
+            # ref2va conditioning still ran on the normal video VAE.
+            _dec_vae = vae
+            if single_frame_vae and single_frame_vae != "none":
+                _dec_vae = _core_nodes.VAELoader().load_vae(single_frame_vae)[0]
+                print(f"[OneForge] single-frame VAE: {single_frame_vae} "
+                      "(independent slice decode)", flush=True)
+                log_lines.append(
+                    f"single-frame VAE: {single_frame_vae} (independent slice decode)")
+            images = _core_nodes.VAEDecode().decode(_dec_vae, sampled)[0]
             log_lines.append(f"sampled: {images.shape[0]}f")
         else:
             log_lines.append(f"generate: skipped (images wired in, {images.shape[0]}f)")
@@ -783,10 +826,11 @@ class PixelForgeOneForge:
         _of_phase("done", done_phase=f"export {_time.perf_counter() - _et0:.1f}s")
         head = " | ".join(log_lines)
         full_forge_report = f"{head} | {forge_report}" if head else forge_report
+        ui["prompt_preview"] = prompt
         return {
             "ui": ui,
             "result": (f_images, f_alpha, durations_json, palette_json,
-                       full_forge_report, frames, sheet, export_report),
+                       full_forge_report, frames, sheet, export_report, prompt),
         }
 
 

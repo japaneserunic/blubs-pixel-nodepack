@@ -555,7 +555,9 @@ class PixelForgeSuperForge:
         if sharpen_grid or _gennative:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
                 images, adv_grid_mode, adv_grid_block, adv_grid_max_block,
-                adv_grid_reduce, False, alpha=alpha)
+                adv_grid_reduce, False, alpha=alpha,
+                nominal_on_empty=(None if custom_palette_image is not None
+                                  else 4))
             src_grid = (gw, gh)
             try:
                 _gi = json.loads(ginfo)

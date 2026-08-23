@@ -173,7 +173,15 @@ class PixelForgeGridRecover:
     output pixel is one real art pixel. Wire grid_width/grid_height into the
     Quantize/Finalize node's pixel_width/height (widget -> input) for a 1:1
     mapping, or set any smaller target and use downsample_filter=nearest —
-    either way no block averaging, no mush."""
+    either way no block averaging, no mush.
+
+    v3.10.9-t2vdensity: nominal_on_empty seeds H3's documented ~4px
+    render pitch into the scored pool when autocorrelation finds NO
+    period peaks on an axis (soft pure-T2V gens carry no drawn global
+    lattice; without the seed a spurious coarse comb went unchallenged
+    -- live b77a428b80: 608x352 gen -> s=6 = 100x58 instead of 152x88).
+    The suite passes None when a ref is armed (the refdensity ruler owns
+    ref-flow density = byte-identical refs)."""
 
     CATEGORY = "PixelForge/pixel"
     FUNCTION = "run"
@@ -214,7 +222,7 @@ class PixelForgeGridRecover:
         }
 
     def run(self, images, mode, manual_block, max_block, reduce, restore_size,
-            alpha=None):
+            alpha=None, nominal_on_empty=4):
         arr = _to_np(images)
         n, h, w, _ = arr.shape
         info = {"source_size": [w, h], "reduce": reduce, "mode": mode}
@@ -230,7 +238,8 @@ class PixelForgeGridRecover:
         if mode == "auto":
             probe = np.median(arr[:min(8, n)].astype(np.float32),
                               axis=0).astype(np.uint8)
-            det = _detect_pixel_grid(probe, s_max=max_block)
+            det = _detect_pixel_grid(probe, s_max=max_block,
+                                       nominal_on_empty=nominal_on_empty)
             if det is not None:
                 s, ox, oy = det
                 auto_detected = True
@@ -257,6 +266,8 @@ class PixelForgeGridRecover:
                 print("[PixelForgeGridRecover] auto: no confident grid, "
                       "falling back to manual_block=%d" % manual_block)
         info["auto_detected"] = bool(auto_detected)
+        info["nominal_seeded"] = bool(
+            getattr(_detect_pixel_grid, "last_seeded", False))
         info["block"] = int(s)
         info["offset"] = [int(ox), int(oy)]
         if frac is not None:

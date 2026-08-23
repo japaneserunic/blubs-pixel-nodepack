@@ -298,21 +298,43 @@ def _block_score(gray, s, ox, oy):
     return between / (within + between + 1e-6)
 
 
-def _detect_pixel_grid(frame_rgb, s_min=2, s_max=10):
+def _detect_pixel_grid(frame_rgb, s_min=2, s_max=10, nominal_on_empty=None):
     """(H,W,3) uint8 -> (block, ox, oy) or None. Detects the apparent pixel
     grid: autocorrelation proposes period candidates per axis, then a
-    variance score with phase search picks the winner and its offset."""
+    variance score with phase search picks the winner and its offset.
+
+    nominal_on_empty (v3.10.9-t2vdensity): when autocorrelation finds NO
+    period peaks on an axis (soft pure-T2V gens carry no drawn global
+    lattice), seed this nominal pitch into the scored pool -- otherwise a
+    spurious coarse comb from the other axis goes unchallenged and the art
+    grid lands far coarser than the source warrants (live b77a428b80:
+    608x352 gen, X-axis silent, Y comb [6,8,10] -> s=6 = 100x58 instead of
+    the 4px-anchored 152x88). None = legacy behavior (identical candidate
+    list). The tie-break still adjudicates: the seed only competes."""
     gray = _luminance(frame_rgb.astype(np.float32))
     gx = np.abs(np.diff(gray, axis=1)).sum(0)
     gy = np.abs(np.diff(gray, axis=0)).sum(1)
-    cand = _autocorr_candidates(gx, s_min, s_max)
-    for c in _autocorr_candidates(gy, s_min, s_max):
+    cand_x = _autocorr_candidates(gx, s_min, s_max)
+    cand_y = _autocorr_candidates(gy, s_min, s_max)
+    cand = list(cand_x)
+    for c in cand_y:
         if c not in cand:
             cand.append(c)
     if not cand:
         cand = list(range(s_min, s_max + 1))
+    _seeded = False
+    if (nominal_on_empty is not None and cand
+            and (not cand_x or not cand_y)
+            and s_min <= nominal_on_empty <= s_max
+            and nominal_on_empty not in cand):
+        cand.append(nominal_on_empty)
+        _seeded = True
+    _detect_pixel_grid.last_seeded = _seeded
+    pool = cand[:4]
+    if _seeded and nominal_on_empty not in pool:
+        pool = cand[:3] + [nominal_on_empty]
     scored = []
-    for s in cand[:4]:
+    for s in pool:
         bs = None
         for oy in range(s):
             for ox in range(s):
