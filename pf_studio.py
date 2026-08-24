@@ -1406,6 +1406,82 @@ class PixelForgeSuperForge:
             report.append(
                 f"look: gen-native solid @ {colors} colors (k-means 3-band"
                 " cel, no vote/smooth; adv_tp_* widgets tune)")
+            # v3.11.23-lineart: two passes for what the k-means leaves
+            # behind on raw-H3 sources (owner: edge gradients, soft line
+            # art, per-frame shimmer):
+            # 1) TEMPORAL MEDIAN-3 -- AA noise flips borderline cells
+            #    between shade bands frame-to-frame. A cell differing from
+            #    BOTH temporal neighbors (which agree with each other) is
+            #    flicker -> snap to them. Real motion persists across
+            #    frames and survives.
+            # 2) DARK-LINE CONSOLIDATION -- H3 spreads line art over
+            #    several near-dark ramp shades; every dark px snaps to the
+            #    batch's modal dark color = one solid line color.
+            try:
+                _ga7 = (images.clamp(0, 1) * 255).round().cpu().numpy()
+                _aa7 = alpha.cpu().numpy()
+                _n7 = _ga7.shape[0]
+                _fix = 0
+                for _i7 in range(1, _n7 - 1):
+                    _opA = _aa7[_i7 - 1] > 0.5
+                    _opB = _aa7[_i7] > 0.5
+                    _opC = _aa7[_i7 + 1] > 0.5
+                    _valid = _opA & _opB & _opC
+                    if not _valid.any():
+                        continue
+                    _dprev = np.abs(_ga7[_i7] - _ga7[_i7 - 1]).mean(-1)
+                    _dnext = np.abs(_ga7[_i7] - _ga7[_i7 + 1]).mean(-1)
+                    _agree = (np.abs(_ga7[_i7 - 1] - _ga7[_i7 + 1]).mean(-1)
+                              <= 10.0)
+                    _shim = _valid & (_dprev > 14.0) & (_dnext > 14.0) & _agree
+                    if _shim.any():
+                        _ga7[_i7][_shim] = _ga7[_i7 + 1][_shim]
+                        _fix += int(_shim.sum())
+                _opall = _aa7 > 0.5
+                _lum7 = _ga7 @ np.array([0.299, 0.587, 0.114],
+                                        dtype=np.float32)
+                _darkm = _opall & (_lum7 < 40.0)
+                _ndark = int(_darkm.sum())
+                if _ndark >= 32:
+                    # v3.11.23b: k-means (k=4) the darks into 4 SOLID
+                    # shades -- one line color + up to 3 dark shading
+                    # bands survive; the 26k-gradient spread collapses.
+                    # (A single modal snap crushed plum hair/boots into
+                    # pure black = the v3.7.9 black-crush bug.)
+                    _dpx = _ga7[_darkm]
+                    _sub = _dpx if len(_dpx) <= 40000 else _dpx[::len(_dpx) // 40000 + 1]
+                    _rng = np.random.default_rng(12345)
+                    _cen = _sub[_rng.choice(len(_sub), 4, replace=False)]
+                    for _ in range(8):
+                        _d2 = ((_sub[:, None, :] - _cen[None, :, :])
+                               ** 2).sum(-1)
+                        _a = _d2.argmin(1)
+                        for _k in range(4):
+                            if (_a == _k).any():
+                                _cen[_k] = _sub[_a == _k].mean(0)
+                    _d2all = ((_dpx[:, None, :] - _cen[None, :, :])
+                              ** 2).sum(-1)
+                    _ga7[_darkm] = _cen[_d2all.argmin(1)]
+                    _linec = _cen[np.argmax(np.bincount(
+                        _d2all.argmin(1), minlength=4))]
+                else:
+                    _linec = None
+                if _fix or _ndark >= 32:
+                    images = torch.from_numpy(
+                        (_ga7 / 255.0).astype(np.float32)).to(images.device)
+                    grid_frames = images
+                if _linec is not None:
+                    report.append(
+                        f"lineart: de-shimmered {_fix} cells, consolidated "
+                        f"{_ndark} dark px to 4 solid shades (line "
+                        f"#{int(_linec[0]):02X}{int(_linec[1]):02X}"
+                        f"{int(_linec[2]):02X})")
+                else:
+                    report.append(
+                        f"lineart: de-shimmered {_fix} cells, darks below "
+                        f"k-means threshold")
+            except Exception as _e7:
+                report.append(f"lineart: skipped ({_e7})")
 
             # v3.10.5-refsnap: snap the flattened blocks onto the ref's
             # EXACT palette (integer-grid modal reduce, no kmeans). The
