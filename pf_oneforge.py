@@ -43,7 +43,7 @@ from .pf_studio import (PixelForgeSuperForge, _save_stage, _REF_LOOK,
                         PromptServer as _PF_PROMPT_SERVER)
 # v3.6.0-bgsync uses these for the backdrop-synced gen prompt (the edit that
 # introduced the call sites forgot this import — NameError on first Forge).
-from .pf_h3 import FPS as _H3_FPS, PixelForgeH3Prompt, clause_for_hex
+from .pf_h3 import FPS as _H3_FPS, PixelForgeH3Prompt, clause_for_hex, _VIEWS
 
 log = logging.getLogger(__name__)
 
@@ -496,9 +496,20 @@ class PixelForgeOneForge:
         # 119-value workflows still align (missing trailing value
         # = default = Gen-native). Flows to SuperForge.run via
         # **forge.
+        
         _rlm = required.pop("adv_ref_look_mode", None)
         if _rlm is not None:
             required["adv_ref_look_mode"] = _rlm
+        # v3.11.22: camera/view preset -- the true LAST widget (after the
+        # backdrop/look_mode tail re-appends). Old workflows missing the
+        # trailing value get "side" = the previously hardcoded view,
+        # byte-identical behavior.
+        required["view"] = (list(_VIEWS.keys()), {
+            "default": "side",
+            "tooltip": "Camera/view preset baked into the H3 prompt. The 8 "
+                       "top-down facings (N/NE/E/SE/S/SW/W/NW) build "
+                       "8-directional character sheets: one forge per "
+                       "facing, same seed + prompt."})
         # One Forge out-of-box defaults = the battle-tested config (owner's
         # known-good, verified across the 2026-08-16 sessions): square 1:1
         # 0.3MP canvas (single character fills it; ~2.5x fewer pixels to gen
@@ -538,6 +549,7 @@ class PixelForgeOneForge:
             sheet_columns, sheet_bg, build_aseprite, aseprite_path,
             drawn_ref_image="", drawn_ref_image_2="", ref_video_1="",
             prompt_segments="[]", gen_win_start=0, single_frame_vae="none",
+            view="side",
             images=None, first_frame=None, ref_image_2=None,
             alpha=None, custom_palette_image=None,
             unique_id=None, **forge):
@@ -574,7 +586,7 @@ class PixelForgeOneForge:
             # green, ~8.3k interior px eaten per frame with key #FFFFFF.
             _ref_bg = _ref_flat_hex(forge)
             prompt = PixelForgeH3Prompt._build(
-                character, action, style, "side",
+                character, action, style, view,
                 clause_for_hex(_ref_bg) + ".", seamless_loop,
                 system_prompt or "")
             length = PixelForgeH3Prompt.snap_frames(seconds)

@@ -23,6 +23,26 @@ _VIEWS = {
     "3/4": "three-quarter top-down RPG view",
     "front": "flat front view",
     "top-down": "direct top-down view",
+    # v3.11.22: 8-direction top-down facings (character builder) + iso/back.
+    # Appended at the end -- combo widgets store strings, old saves safe.
+    "top-down N": "top-down view seen from directly above, character facing "
+                  "north, away from the camera, back of the head visible",
+    "top-down NE": "top-down view seen from directly above, character facing "
+                   "northeast, up and to the right",
+    "top-down E": "top-down view seen from directly above, character facing "
+                  "east, to the right, side of the character visible",
+    "top-down SE": "top-down view seen from directly above, character facing "
+                   "southeast, down and to the right",
+    "top-down S": "top-down view seen from directly above, character facing "
+                  "south, toward the camera, face fully visible",
+    "top-down SW": "top-down view seen from directly above, character facing "
+                   "southwest, down and to the left",
+    "top-down W": "top-down view seen from directly above, character facing "
+                  "west, to the left, side of the character visible",
+    "top-down NW": "top-down view seen from directly above, character facing "
+                   "northwest, up and to the left",
+    "isometric": "isometric projection view, three-quarter elevated angle",
+    "back": "flat back view, character facing away from the camera",
 }
 
 _BACKGROUNDS = {
