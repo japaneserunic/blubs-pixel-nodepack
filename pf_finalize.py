@@ -303,7 +303,8 @@ def _detect_pixel_grid(frame_rgb, s_min=2, s_max=10, nominal_on_empty=None):
     grid: autocorrelation proposes period candidates per axis, then a
     variance score with phase search picks the winner and its offset.
 
-    nominal_on_empty (v3.10.9-t2vdensity): when autocorrelation finds NO
+    nominal_on_empty (v3.10.9-t2vdensity / v3.11.8-t2vpitch): when
+    autocorrelation finds NO
     period peaks on an axis (soft pure-T2V gens carry no drawn global
     lattice), seed this nominal pitch into the scored pool -- otherwise a
     spurious coarse comb from the other axis goes unchallenged and the art
@@ -324,15 +325,64 @@ def _detect_pixel_grid(frame_rgb, s_min=2, s_max=10, nominal_on_empty=None):
         cand = list(range(s_min, s_max + 1))
     _seeded = False
     if (nominal_on_empty is not None and cand
-            and (not cand_x or not cand_y)
-            and s_min <= nominal_on_empty <= s_max
-            and nominal_on_empty not in cand):
-        cand.append(nominal_on_empty)
+            and s_min <= nominal_on_empty <= s_max):
+        # v3.11.15: adjudicate whenever a nominal is provided -- not just on
+        # silent axes. Live ddddcfb2: BOTH axes carried spurious combs, the
+        # legacy path picked 6 (100x58) while the fine evidence sat at 3.
+        # Autocorr combs on soft T2V gens are proposals, not proof; a REAL
+        # lattice still wins because its exc score dominates (true-4 synth:
+        # exc(s=4)=+0.625 vs +0.169). The degenerate p=2 comb stays excluded.
+        if nominal_on_empty not in cand:
+            cand.append(nominal_on_empty)
         _seeded = True
     _detect_pixel_grid.last_seeded = _seeded
     pool = cand[:4]
     if _seeded and nominal_on_empty not in pool:
         pool = cand[:3] + [nominal_on_empty]
+    # v3.11.8-t2vpitch: a silent axis means H3 drew no global lattice, so the
+    # seeded nominal is a POLICY default, not a measurement. Adjudicate the
+    # plausible fine range 2..nominal by fine-tolerance (+-0.75px) lattice-
+    # recall excess over chance -- measured on live c069502ba3 (608x352 T2V
+    # dino: exc(s=3)=+0.174 vs exc(s=4)=+0.162, zoom shows 3px steps) and on
+    # synthetic controls (true-4 lattice peaks +0.625 at s=4, true-3 peaks
+    # +0.500 at s=3, cleanly separated). Floor keeps structure-less gens on
+    # the nominal instead of chasing noise combs.
+    _seed_pick = None
+    if _seeded:
+        # floor of 3: at p=2 chance coverage is 75% and any dense edge
+        # field scores ~+0.25 for free (degenerate fine comb); H3's art
+        # pitch is documented ~4px and 3px is the finest seen live.
+        _lo = max(3, s_min)
+        _hi = int(nominal_on_empty)
+
+        def _ft_exc(pos, pdim):
+            if len(pos) < 10:
+                return -1.0
+            best = 0.0
+            for ph in np.arange(0, pdim, max(pdim / 16.0, 0.25)):
+                d = np.abs((pos - ph + pdim / 2) % pdim - pdim / 2)
+                best = max(best, float((d <= 0.75).mean()))
+            return best - min(1.0, 1.5 / pdim)
+
+        # color edges (max-channel RGB diff), not luminance -- red/green
+        # boundaries cancel in luma and vanish from the profile
+        _f32 = frame_rgb.astype(np.float32)
+        dx_ = np.abs(np.diff(_f32, axis=1)).max(-1)
+        dy_ = np.abs(np.diff(_f32, axis=0)).max(-1)
+        posx = np.where(dx_.max(axis=0) > 40)[0] + 0.5
+        posy = np.where(dy_.max(axis=1) > 40)[0] + 0.5
+        _pool2 = set(range(_lo, _hi + 1))
+        for _c in pool[:4]:
+            if _c >= 3:
+                _pool2.add(_c)
+        _exc = {s: min(_ft_exc(posx, s), _ft_exc(posy, s))
+                for s in _pool2}
+        _best = max(_exc, key=lambda k: _exc[k])
+        if _exc[_best] >= 0.10:
+            _seed_pick = _best
+        for _s in range(_lo, _hi + 1):
+            if _s not in pool:
+                pool.append(_s)
     scored = []
     for s in pool:
         bs = None
@@ -353,6 +403,10 @@ def _detect_pixel_grid(frame_rgb, s_min=2, s_max=10, nominal_on_empty=None):
     # raw argmax systematically over-reduces and the sprite comes out
     # low-res. Among candidates within 90% of the best score, take the
     # SMALLEST block — keep the finest grid the evidence supports.
+    if _seed_pick is not None:
+        hit = [x for x in scored if x[1] == _seed_pick]
+        if hit:
+            return hit[0][1], hit[0][2], hit[0][3]
     pool = [x for x in scored if x[0] >= 0.9 * best_score]
     _score, s, ox, oy = min(pool, key=lambda x: x[1])
     return s, ox, oy

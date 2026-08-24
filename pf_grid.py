@@ -222,7 +222,7 @@ class PixelForgeGridRecover:
         }
 
     def run(self, images, mode, manual_block, max_block, reduce, restore_size,
-            alpha=None, nominal_on_empty=4):
+            alpha=None, nominal_on_empty=4, alpha_keep=0.5):
         arr = _to_np(images)
         n, h, w, _ = arr.shape
         info = {"source_size": [w, h], "reduce": reduce, "mode": mode}
@@ -354,7 +354,13 @@ class PixelForgeGridRecover:
                                    dtype=np.float32) / 255.0
                 acrop = a[oy:oy + new_h, ox:ox + new_w]
                 small[i] = _reduce_blocks_masked(crop, acrop, s, reduce)
-                small_a[i] = (acrop.reshape(gh, s, gw, s).mean((1, 3)) > 0.5)
+                # v3.11.13: alpha_keep -- silhouette boundary blocks are
+                # CHAR/SCREEN mixtures; majority(0.5) drops the outer
+                # art-pixel ring (live 5fb8bff4cc: 119-cell ring eaten).
+                # Color stays clean either way -- _reduce_blocks_masked
+                # reads only per-px-opaque samples.
+                small_a[i] = (acrop.reshape(gh, s, gw, s).mean((1, 3))
+                              > alpha_keep)
             else:
                 small[i] = _reduce_blocks(crop, s, reduce)
                 small_a[i] = 1.0

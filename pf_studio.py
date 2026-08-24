@@ -406,7 +406,8 @@ class PixelForgeSuperForge:
                 _tri(adv_key_rescue, True),
                 _pick(adv_key_interior_max_area, 2.0),
                 _tri(adv_key_temporal_alpha, True),
-                _pick(adv_key_drop_detached, 5.0),
+                # v3.11.17: flying content IS the content in T2V -- the 5%-of-main rule + the 2px adjacency gate ate every far droplet (live 3a5b3d6e81: far-arc drops 0px in keyed); residue cleanup is the key sweep's job now
+                (_pick(adv_key_drop_detached, 5.0) if not _gennative else 0.0),
                 neutral_key_tight=_gennative)
             _ak = getattr(PixelForgeChromaKey, "LAST_AUTO_KEYS", None)
             report.append(f"key: {key_color} ({key_strength.lower()})" +
@@ -416,6 +417,42 @@ class PixelForgeSuperForge:
                            "tight neutral keys)"
                            if _gennative else ""))
             _keyed_here = True
+            # v3.11.19: border-support filter on the auto keys. A splash
+            # touching the frame edge registers as a "backdrop" color
+            # (live 89ce8bad: coffee red #8F0200 joined green #05EE00 ->
+            # every near-key pass then ate the coffee as "residue"). Real
+            # chroma DOMINATES the border ring; content at the border is a
+            # sliver. Keys with < 1% border support (or < 24 px) are dropped
+            # once, here, so the sweep / gap key / de-fringe / re-seat all
+            # stop treating that content color as backdrop.
+            _ak1 = getattr(PixelForgeChromaKey, "LAST_AUTO_KEYS", None)
+            if _ak1 and len(_ak1) > 1 and images.ndim == 4:
+                try:
+                    _f0 = (images[0].clamp(0, 1) * 255).cpu().numpy()
+                    _bh, _bw = _f0.shape[:2]
+                    _t = 4
+                    _ring = np.concatenate([
+                        _f0[:_t].reshape(-1, 3), _f0[-_t:].reshape(-1, 3),
+                        _f0[:, :_t].reshape(-1, 3),
+                        _f0[:, -_t:].reshape(-1, 3)]).astype(np.float32)
+                    _sup = []
+                    for _hx5 in _ak1:
+                        _c5 = np.array([int(_hx5[_j5:_j5 + 2], 16)
+                                        for _j5 in (1, 3, 5)],
+                                       dtype=np.float32)
+                        _sup.append(int((np.sqrt(((_ring - _c5) ** 2)
+                                                 .sum(-1)) < 55.0).sum()))
+                    _keep5 = [k for k, s in zip(_ak1, _sup)
+                              if s >= max(24, 0.01 * _ring.shape[0])]
+                    if _keep5 and len(_keep5) < len(_ak1):
+                        PixelForgeChromaKey.LAST_AUTO_KEYS = _keep5
+                        report.append(
+                            "key filter: dropped " +
+                            ", ".join(k for k in _ak1 if k not in _keep5)
+                            + f" (border support {_sup}); kept " +
+                            ", ".join(_keep5))
+                except Exception as _e5:
+                    report.append(f"key filter: skipped ({_e5})")
             # v3.7.2-sandblast: letterbox / backdrop-variant rescue. H3
             # sometimes delivers a NON-uniform backdrop (measured on run
             # ea62126afc: green bars + white band; single-color key left the
@@ -473,7 +510,8 @@ class PixelForgeSuperForge:
                             _tri(adv_key_rescue, True),
                             _pick(adv_key_interior_max_area, 2.0),
                             _tri(adv_key_temporal_alpha, True),
-                            _pick(adv_key_drop_detached, 5.0))
+                            # v3.11.17: flying content IS the content in T2V -- the 5%-of-main rule + the 2px adjacency gate ate every far droplet (live 3a5b3d6e81: far-arc drops 0px in keyed); residue cleanup is the key sweep's job now
+                            (_pick(adv_key_drop_detached, 5.0) if not _gennative else 0.0))
                         _a2 = torch.minimum(alpha[i],
                                             _try_a[0].to(alpha.device))
                         if float((_a2 > 0.5).float().mean()) <= \
@@ -488,55 +526,179 @@ class PixelForgeSuperForge:
         else:
             report.append("key: skipped (alpha wired in)")
             _keyed_here = False
-        # v3.10.5-greensweep (gen-native): the border flood + temporal vote
-        # leave shadow-drifted / detached green backdrop residue on some
-        # frames (measured on run 2293e1bd04: 400-1200 greenish opaque px
-        # on f28-32 AFTER keying). A strongly green-dominant px (G>R+25 &
-        # G>B+25) is backdrop/spill by definition when the ref sprite
-        # carries no green at all -- a cyan gi (#00D3FE) or blue hair fail
-        # the G>B gate and stay. Refless: only sweep when the detected
-        # screen itself was green-dominant.
+                # v3.11.9-smartbg (gen-native): residue sweep keyed to the DETECTED
+        # screen color(s), not a hue formula. The old green-dominance rule
+        # (G>R+25 & G>B+25) missed cyan screens by construction (#54A3A4:
+        # B~=G fails the G>B gate -> teal fringe survived on live 054b1ae2).
+        # Now: opaque px within euclidean 55 of ANY auto-keyed screen color
+        # are residue, provided the ref palette carries no such color.
         if (_gennative and alpha is not None
                 and _tri(adv_gn_green_sweep, True)):
             try:
-                _gs_ok = True
-                _gs_why = "ref palette has no green"
-                if custom_palette_image is not None:
-                    _rg0 = (custom_palette_image[0].clamp(0, 1) * 255
-                            ).round().to(torch.uint8).cpu().numpy()[..., :3]
-                    _p0, _b0, _k0, _a0 = _ref_palette(_rg0, colors)
-                    _all0 = np.array(
-                        [list(map(float, c)) for c in _p0]
-                        + [list(map(float, _b0))], dtype=np.float32)
-                    _gs_ok = not bool(((_all0[:, 1] > _all0[:, 0] + 25)
-                                       & (_all0[:, 1] > _all0[:, 2] + 25)
-                                       ).any())
-                else:
-                    _gs_ok = False
-                    _gs_why = "green screen"
-                    for _hx0 in (getattr(PixelForgeChromaKey,
-                                         "LAST_AUTO_KEYS", None) or []):
-                        _c0 = [int(_hx0[_j:_j + 2], 16)
-                               for _j in (1, 3, 5)]
-                        if _c0[1] > _c0[0] + 25 and _c0[1] > _c0[2] + 25:
-                            _gs_ok = True
-                if _gs_ok:
-                    _fa0 = (images.clamp(0, 1) * 255).cpu().numpy()
-                    _aa0 = alpha.cpu().numpy()
-                    _gm0 = ((_aa0 > 0.5)
-                            & (_fa0[..., 1] > _fa0[..., 0] + 25)
-                            & (_fa0[..., 1] > _fa0[..., 2] + 25))
-                    _ng0 = int(_gm0.sum())
-                    if _ng0:
-                        alpha = torch.from_numpy(np.where(
-                            _gm0, 0.0, _aa0).astype(np.float32)).to(
-                            alpha.device)
+                import scipy.ndimage as _ndi
+                _kb = []
+                for _hx0 in (getattr(PixelForgeChromaKey,
+                                     "LAST_AUTO_KEYS", None) or []):
+                    _kb.append([int(_hx0[_j:_j + 2], 16)
+                                for _j in (1, 3, 5)])
+                if _kb:
+                    _KS = np.array(_kb, dtype=np.float32)
+                    _gs_ok = True
+                    _gs_why = "screen color(s) " + " ".join(
+                        str(_h) for _h in (
+                            getattr(PixelForgeChromaKey,
+                                    "LAST_AUTO_KEYS", None) or []))
+                    if custom_palette_image is not None:
+                        _rg0 = (custom_palette_image[0].clamp(0, 1) * 255
+                                ).round().to(torch.uint8).cpu(
+                                    ).numpy()[..., :3]
+                        _p0, _b0, _k0, _a0 = _ref_palette(_rg0, colors)
+                        _all0 = np.array(
+                            [list(map(float, c)) for c in _p0]
+                            + [list(map(float, _b0))], dtype=np.float32)
+                        _dd0 = np.sqrt(((_all0[:, None, :] - _KS[None, :, :])
+                                        ** 2).sum(-1))
+                        _gs_ok = not bool((_dd0 < 55.0).any())
+                    if _gs_ok:
+                        _fa0 = (images.clamp(0, 1) * 255).cpu().numpy()
+                        _aa0 = alpha.cpu().numpy()
+                        _dm0 = np.sqrt(((
+                            _fa0[..., None, :] - _KS[None, None, :, :]
+                        ) ** 2).sum(-1)).min(-1)
+                        _gm0 = (_aa0 > 0.5) & (_dm0 < 55.0)
+                        # v3.11.18: sweep DETACHED components only. Live
+                        # 89ce8bad: auto-keys picked up dark red (#8F0200)
+                        # from the coffee splash touching the border, and
+                        # the sweep then keyed the coffee itself (it is
+                        # main-connected content). Residue is by definition
+                        # detached fragments; the main component is spared.
+                        _lbl0, _nl0 = _ndi.label(_aa0 > 0.5)
+                        if _nl0 > 1:
+                            _sz0 = _ndi.sum(_aa0 > 0.5, _lbl0,
+                                            range(1, _nl0 + 1))
+                            _main0 = int(np.argmax(_sz0)) + 1
+                            _gm0 &= (_lbl0 != _main0)
+                        _ng0 = int(_gm0.sum())
+                        if _ng0:
+                            alpha = torch.from_numpy(np.where(
+                                _gm0, 0.0, _aa0).astype(np.float32)).to(
+                                    alpha.device)
+                            report.append(
+                                f"key sweep: keyed {_ng0} residue px "
+                                f"batch-wide ({_gs_why})")
+                    else:
                         report.append(
-                            f"green sweep: keyed {_ng0} leftover "
-                            f"green-dominant px batch-wide (bg residue; "
-                            f"{_gs_why})")
+                            "key sweep: skipped (ref palette sits on the "
+                            "screen color)")
+                else:
+                    report.append("key sweep: skipped (no auto keys)")
             except Exception as _e:
-                report.append(f"green sweep: skipped ({_e})")
+                report.append(f"key sweep: skipped ({_e})")
+        # v3.11.11-gapkey rev2: enclosed screen pockets by HUE. Border-only
+        # keying never reaches backdrop fully enclosed by the body
+        # (arm/torso holes); the v3.10.3 interior pass was disabled for
+        # punching holes into character-internal regions. Measured on live
+        # e1464e15a0: pockets survive as DESATURATED shadow green ([88,126,
+        # 55], hue ~84) that fails both redmean distance (110) and strict
+        # dominance tests. Rule: inside ENCLOSED opaque components, key px
+        # whose hue sits within 50 deg of a detected screen-key hue with
+        # sat > 0.25; stand down when the character itself wears that hue
+        # (interior green-ish share > 2%).
+        if (_gennative and alpha is not None
+                and _tri(adv_key_interior, True)):
+            try:
+                import scipy.ndimage as _ndi
+                _gk = [[int(_hx3[_j3:_j3 + 2], 16) for _j3 in (1, 3, 5)]
+                       for _hx3 in (getattr(PixelForgeChromaKey,
+                                            "LAST_AUTO_KEYS", None) or [])]
+                if _gk:
+                    _KS3 = np.array(_gk, dtype=np.float32) / 255.0
+                    _kmx = _KS3.max(-1)
+                    _kmn = _KS3.min(-1)
+                    _kd = np.maximum(_kmx - _kmn, 1e-6)
+                    _kr, _kg, _kb = _KS3[..., 0], _KS3[..., 1], _KS3[..., 2]
+                    _kh = np.where(_kmx == _kr, (60 * ((_kg - _kb) / _kd))
+                                   % 360,
+                                   np.where(_kmx == _kg,
+                                            60 * ((_kb - _kr) / _kd) + 120,
+                                            60 * ((_kr - _kg) / _kd) + 240))
+                    _fa3 = (images.clamp(0, 1) * 255).cpu().numpy()
+                    _aa3 = alpha.cpu().numpy()
+                    _n3, _h3, _w3 = _fa3.shape[:3]
+                    _fr = _fa3[..., 0] / 255.0
+                    _fg = _fa3[..., 1] / 255.0
+                    _fb = _fa3[..., 2] / 255.0
+                    _fmx = np.max((_fr, _fg, _fb), axis=0)
+                    _fmn = np.min((_fr, _fg, _fb), axis=0)
+                    _fd = np.maximum(_fmx - _fmn, 1e-6)
+                    _fsat = np.where(_fmx > 0, _fd / np.maximum(_fmx, 1e-6),
+                                     0.0)
+                    _fhue = np.zeros_like(_fmx)
+                    _m = (_fmx == _fr) & (_fd > 0)
+                    _fhue[_m] = (60 * ((_fg - _fb)[_m] / _fd[_m])) % 360
+                    _m = (_fmx == _fg) & (_fd > 0)
+                    _fhue[_m] = 60 * ((_fb - _fr)[_m] / _fd[_m]) + 120
+                    _m = (_fmx == _fb) & (_fd > 0)
+                    _fhue[_m] = 60 * ((_fr - _fg)[_m] / _fd[_m]) + 240
+                    # v3.11.18: PER-KEY worn check. Live 89ce8bad: the auto
+                    # keys were [#8F0200 red, #05EE00 green]; the coffee
+                    # plume is red-hue, so the old any-key guard saw
+                    # "character wears the screen hue" and skipped ALL
+                    # pocket keying. Now each key stands down individually:
+                    # a key whose hue the interior wears (>2%) is excluded
+                    # from pocket keying; the others still run.
+                    _perkey = (((_fhue[..., None] - _kh[None, None, :]
+                                 + 180) % 360) - 180)
+                    _sklist = [((np.abs(_perkey[..., _kx]) < 50.0)
+                                & (_fsat > 0.25)
+                                & (_fa3.max(-1) > 40.0))
+                               for _kx in range(_kh.shape[0])]
+                    _gp = _gq = 0
+                    for _i3 in range(_n3):
+                        _op3 = _aa3[_i3] > 0.5
+                        if not _op3.any():
+                            continue
+                        _lbl, _nl = _ndi.label(_op3)
+                        if not _nl:
+                            continue
+                        _edge = set(_lbl[0, :]) | set(_lbl[-1, :]) \
+                            | set(_lbl[:, 0]) | set(_lbl[:, -1])
+                        _enc = np.zeros_like(_op3)
+                        for _L in range(1, _nl + 1):
+                            if _L in _edge:
+                                continue
+                            _enc |= (_lbl == _L)
+                        if not _enc.any():
+                            continue
+                        _body = _op3 & ~_enc
+                        _m3 = np.zeros_like(_op3)
+                        _nworn = 0
+                        for _sk in _sklist:
+                            if _body.any() and (_sk[_i3][_body]).mean() > 0.02:
+                                _nworn += 1
+                                continue
+                            _m3 |= (_sk[_i3] & _enc)
+                        _m3 &= _op3
+                        if _nworn == len(_sklist):
+                            _gp = -1
+                            break
+                        _npx = int(_m3.sum())
+                        if _npx:
+                            _aa3[_i3][_m3] = 0.0
+                            _gp += _npx
+                            _gq += 1
+                    if _gp == -1:
+                        report.append(
+                            "gap key: skipped (character wears every "
+                            "screen hue)")
+                    elif _gp:
+                        alpha = torch.from_numpy(
+                            _aa3.astype(np.float32)).to(alpha.device)
+                        report.append(
+                            f"gap key: keyed {_gp} px in {_gq} enclosed "
+                            f"screen pocket(s)")
+            except Exception as _e3:
+                report.append(f"gap key: skipped ({_e3})")
         capture("keyed", images, alpha, pixel_exact=False)
         # v3.8.2-refdensity: full-res keyed stash for the ref-density
         # reduce (the look branch reduces straight from here).
@@ -557,8 +719,96 @@ class PixelForgeSuperForge:
                 images, adv_grid_mode, adv_grid_block, adv_grid_max_block,
                 adv_grid_reduce, False, alpha=alpha,
                 nominal_on_empty=(None if custom_palette_image is not None
-                                  else 4))
+                                  else 4),
+                # v3.11.13: keep silhouette boundary blocks at 35%% coverage
+                # (majority 0.5 ate the outer art-pixel ring, live 5fb8bff4cc)
+                alpha_keep=(0.35 if _gennative else 0.5))
             src_grid = (gw, gh)
+            # v3.11.9-smartbg rev2: silhouette de-fringe. Flatten bakes
+            # CHAR/SCREEN mixtures into boundary blocks (teal fringe on live
+            # 054b1ae2/e4bd9decc6: 931 ring px batch-wide at d<90 of the key).
+            # Mixing-line fitting under-fits real blocks (multi-color + AA);
+            # measured simpler rule: any SILHOUETTE-ring block near the key
+            # is fringe -> fill with the local interior median. Guarded: if
+            # the character itself sits near the screen color (interior
+            # share > 5%), the pass stands down -- never eat legit art.
+            if _gennative and _tri(adv_gn_green_sweep, True):
+                try:
+                    _uk = [[int(_hx1[_j1:_j1 + 2], 16) for _j1 in (1, 3, 5)]
+                           for _hx1 in (getattr(PixelForgeChromaKey,
+                                                "LAST_AUTO_KEYS", None)
+                                        or [])]
+                    if _uk:
+                        _KSu = np.array(_uk, dtype=np.float32)
+                        _ga1 = (images.clamp(0, 1) * 255).round(
+                            ).cpu().numpy().astype(np.float32)
+                        _aa1 = alpha.cpu().numpy()
+                        _nN, _nH, _nW = _ga1.shape[:3]
+
+                        def _sil(opm):
+                            _Tp = np.pad(~opm, 1)
+                            _nb = np.zeros_like(opm)
+                            for _dy in (-1, 0, 1):
+                                for _dx in (-1, 0, 1):
+                                    if _dy == 0 and _dx == 0:
+                                        continue
+                                    _nb |= _Tp[1 + _dy:_nH + 1 + _dy,
+                                               1 + _dx:_nW + 1 + _dx]
+                            return opm & _nb
+
+                        _R = 6
+                        _TOTF = _TOTK = 0
+                        _skip = False
+                        for _i1 in range(_nN):
+                            _op = _aa1[_i1] > 0.5
+                            if not _op.any():
+                                continue
+                            _rgb = _ga1[_i1]
+                            _dk1 = np.sqrt(((_rgb - _KSu[0][None, None, :])
+                                            ** 2).sum(-1))
+                            for _k2 in _KSu[1:]:
+                                _dk1 = np.minimum(_dk1, np.sqrt(
+                                    ((_rgb - _k2[None, None, :]) ** 2).sum(-1)))
+                            _sl = _sil(_op)
+                            _it = _op & ~_sl
+                            if not _sl.any():
+                                continue
+                            if (_dk1[_it] < 90.0).mean() > 0.05:
+                                _skip = True
+                                break
+                            _ys, _xs = np.nonzero(_sl & (_dk1 < 90.0))
+                            for _y, _x in zip(_ys, _xs):
+                                _y0, _y1 = max(0, _y - _R), min(_nH,
+                                                                _y + _R + 1)
+                                _x0, _x1 = max(0, _x - _R), min(_nW,
+                                                                _x + _R + 1)
+                                _sub = _op[_y0:_y1, _x0:_x1].copy()
+                                _sub[_y - _y0, _x - _x0] = False
+                                _cy, _cx = np.nonzero(_sub)
+                                if len(_cy) == 0:
+                                    _aa1[_i1, _y, _x] = 0.0
+                                    _TOTK += 1
+                                    continue
+                                _C = _rgb[_y0:_y1, _x0:_x1][_cy, _cx]
+                                _rgb[_y, _x] = np.median(_C, axis=0)
+                                _TOTF += 1
+                        if _skip:
+                            report.append(
+                                "smart bg: skipped (character sits near "
+                                "the screen color)")
+                        elif _TOTF or _TOTK:
+                            images = torch.from_numpy(
+                                (_ga1 / 255.0).astype(np.float32)).to(
+                                    images.device)
+                            alpha = torch.from_numpy(
+                                _aa1.astype(np.float32)).to(alpha.device)
+                            report.append(
+                                f"smart bg: de-fringed {_TOTF} ring blocks"
+                                f", keyed {_TOTK} orphans vs {len(_uk)} "
+                                f"screen color(s)")
+                except Exception as _e2:
+                    report.append(f"smart bg: skipped ({_e2})")
+
             try:
                 _gi = json.loads(ginfo)
                 if _gi.get("fractional"):
@@ -588,6 +838,106 @@ class PixelForgeSuperForge:
                 report.append(f"grid: {gw}x{gh}")
         else:
             report.append("grid: off")
+        # v3.11.14: detached-content re-seat. Flying islands (coffee drops,
+        # sparks, debris) are sub-cell at block scale and die in the
+        # block-alpha rule (live 5fb8bff4cc: 6761 -> 601 brown px across the
+        # keyed->grid boundary while the keyer itself loses none). Every
+        # DETACHED keyed component re-claims the cells it covers with >= 2
+        # opaque px, colored by its own pixels -- the main subject is left
+        # to alpha_keep alone.
+        if _gennative and alpha is not None and _keyed_full is not None:
+            try:
+                import scipy.ndimage as _ndi
+                _gi4 = json.loads(ginfo) if ginfo else {}
+                _s4 = int(_gi4.get("block", 0) or 0)
+                if _s4 >= 2:
+                    # v3.11.18: residue islands (near a screen key) are NOT
+                    # content -- re-seat skips them (live 89ce8bad: green
+                    # speckle re-seated batch-wide = bg bleed).
+                    _gk4 = [[int(_hx4[_j4:_j4 + 2], 16)
+                             for _j4 in (1, 3, 5)]
+                            for _hx4 in (getattr(PixelForgeChromaKey,
+                                                 "LAST_AUTO_KEYS", None)
+                                         or [])]
+                    _KS4 = (np.array(_gk4, dtype=np.float32) if _gk4
+                            else np.zeros((1, 3), np.float32))
+                    _off4 = _gi4.get("offset", [0, 0]) or [0, 0]
+                    _ka4 = _keyed_full[1].cpu().numpy()
+                    _kr4 = _keyed_full[0].cpu().numpy()
+                    _ga4 = alpha.cpu().numpy()
+                    _gr4 = images.cpu().numpy()
+                    _n4, _h4, _w4 = _ka4.shape
+                    _oy4, _ox4 = int(_off4[1]), int(_off4[0])
+                    _seatc = 0
+                    for _i4 in range(_n4):
+                        _op4 = _ka4[_i4] > 0.5
+                        if not _op4.any():
+                            continue
+                        _lbl4, _nl4 = _ndi.label(_op4)
+                        if _nl4 < 2:
+                            continue
+                        _sz4 = _ndi.sum(_op4, _lbl4, range(1, _nl4 + 1))
+                        _main = int(np.argmax(_sz4)) + 1
+                        _gaB = _ga4[_i4] > 0.5
+                        # v3.11.16 REVERTED to islands-only: the
+                        # main-adjacency variant re-seated ~7.4k cells on
+                        # live 3a5b3d6e81 = a 1px fuzz ring around the whole
+                        # silhouette (every low-coverage edge cell is
+                        # adjacent to a kept cell). Stream-connected
+                        # sub-cell bulges are inherent AA, not content.
+                        for _L in range(1, _nl4 + 1):
+                            if _L == _main:
+                                continue
+                            _m4 = _lbl4 == _L
+                            if _m4.sum() < 2:
+                                continue
+                            _med4 = np.median(_kr4[_i4][_m4], axis=0)
+                            # 55 not 90: live 89ce8bad's red "key" IS the
+                            # coffee's color family (#8F0200 vs brown ~75
+                            # apart) -- at 90 the filter ate the coffee
+                            # drops as "residue". 55 matches the sweep.
+                            if float(np.min(np.sqrt(
+                                    ((_med4 - _KS4) ** 2).sum(-1)))) < 55.0:
+                                continue
+                            _ys, _xs = np.nonzero(_m4)
+                            _cy = ((_ys - _oy4) // _s4).astype(np.int64)
+                            _cx = ((_xs - _ox4) // _s4).astype(np.int64)
+                            _ok = ((_cy >= 0) & (_cy < _ga4.shape[1])
+                                   & (_cx >= 0) & (_cx < _ga4.shape[2]))
+                            _cy, _cx = _cy[_ok], _cx[_ok]
+                            _ys, _xs = _ys[_ok], _xs[_ok]
+                            if len(_cy) == 0:
+                                continue
+                            _cid = _cy * _ga4.shape[2] + _cx
+                            # v3.11.15b: >= 1 px -- a far-shrunk drop is a
+                            # single source pixel by the time it detaches
+                            # fully; >= 2 still ate it (owner report).
+                            for _cell in np.unique(_cid):
+                                _by, _bx = divmod(int(_cell),
+                                                  _ga4.shape[2])
+                                if _gaB[_by, _bx]:
+                                    continue
+                                _sel = _cid == _cell
+                                _gaB[_by, _bx] = True
+                                _gr4[_i4, _by, _bx] = np.median(
+                                    _kr4[_i4][_ys[_sel], _xs[_sel]],
+                                    axis=0)
+                                _seatc += 1
+                        _ga4[_i4] = _gaB.astype(np.float32)
+                    if _seatc:
+                        alpha = torch.from_numpy(
+                            _ga4.astype(np.float32)).to(alpha.device)
+                        # v3.11.14b HOTFIX: _gr4 and _kr4 are both 0-1
+                        # tensors -- the /255 here blacked out the whole
+                        # frame (owner: "just a black silhouette").
+                        images = torch.from_numpy(
+                            _gr4.astype(np.float32)).to(images.device)
+                        grid_frames = images
+                        report.append(
+                            f"detached re-seat: recovered {_seatc} cells "
+                            f"of flying content")
+            except Exception as _e4:
+                report.append(f"detached re-seat: skipped ({_e4})")
         grid_frames = images
         if sharpen_grid or _gennative:
             capture("grid", images, alpha, pixel_exact=True)
@@ -1011,7 +1361,52 @@ class PixelForgeSuperForge:
             # output art (flatten happened at the grid stage).
             report.append(
                 "look: gen-native flatten (native block grid, the gen's "
-                "own colors 1:1, no quantize)")
+                "own colors 1:1)")
+            # v3.11.10-solidlook: collapse H3's shading ramps + soft line
+            # art into flat pixel-art bands. Flatten kills block mush but
+            # keeps per-block gradients (H3 paints smooth ramps); TruePixel
+            # consolidates them onto a k-means palette FROM THE GEN ITSELF
+            # + cel bands + region vote + despeckle (v3.7.x-hardened chain).
+            # Owner verdict on live e4bd9decc6/c4433541: "too many
+            # gradients, interior/exterior line art should be more solid".
+            # adv_tp_* widgets now tune this pass (bands -1 -> preset 2).
+            images, alpha, _tpm, _tpp = PixelForgeTruePixel().run(
+                images, tw, th, "area", colors,
+                _pick(adv_tp_share, 1.0),
+                _pick(adv_tp_flatten, 0.0), 2,
+                _pick(adv_tp_bands, 3),
+                _pick(adv_tp_ambient, 0.35),
+                _pick(adv_tp_shadow_thr, 0.55),
+                _pick(adv_tp_highlight_thr, 0.85),
+                _pick(adv_tp_cel_contrast, 1.0),
+                _pick(adv_tp_hue_shift, 0.0),
+                _pick(adv_tp_vibrancy, 1.0),
+                "inner" if _tri(adv_tp_outline, False) else "off",
+                dmode, dstrength,
+                # v3.11.14: despeckle off -- it eats the re-seated 1-cell
+                # droplets (and any legit single-cell detail)
+                False,
+                _pick(adv_tp_saturation, 1.05),
+                _pick(adv_tp_contrast, 1.0),
+                _pick(adv_tp_sharpen, 0.0),
+                # auto_subject=False: measured on e4bd9decc6 -- with the
+                # backdrop dominating the frame, subject detection built a
+                # dark-only palette and shredded the sprite; full-frame
+                # k-means + the alpha matte is the clean path (alpha hides
+                # the backdrop clusters).
+                # v3.11.12: shade_smooth=False + region_vote=False --
+                # measured A/B on live e1464e15a0 f28 (owner verdict
+                # "melting playdough" on the smooth+vote build): killing
+                # the smoothers keeps hair strands + body definition
+                # while bands=3 keeps the shading deliberate. The vote at
+                # 1-cell scale is the v3.8.9 detail-eater all over again.
+                False, 28.0, 1, "manual", 10, 0.06, False, False, 5,
+                alpha=alpha)
+            grid_frames = images
+            report.append(
+                f"look: gen-native solid @ {colors} colors (k-means 3-band"
+                " cel, no vote/smooth; adv_tp_* widgets tune)")
+
             # v3.10.5-refsnap: snap the flattened blocks onto the ref's
             # EXACT palette (integer-grid modal reduce, no kmeans). The
             # block median keeps H3's per-pixel gradients (measured on run
@@ -1071,11 +1466,21 @@ class PixelForgeSuperForge:
                     # with the input even when the gen drifts); explicit
                     # adv_gn_ref_snap=on keeps the guarded mode.
                     _gtrip = (_core < 27.0 or _gmed > 75.0)
-                    if _gtrip and adv_gn_ref_snap == "on":
+                    # v3.11.8-t2vpitch: catastrophic trip stands preset
+                    # down. A ref armed for one character (R2V) must not
+                    # repaint an unrelated T2V gen (live c069502ba3: brown
+                    # T-rex snapped onto a stale Sasuke palette, core 1-9%,
+                    # median 132). Matching gens measure core 25-43%, so
+                    # this never fires on legit R2V runs.
+                    _gforeign = (_core < 10.0 and _gmed > 95.0)
+                    if _gtrip and (adv_gn_ref_snap == "on"
+                                   or (adv_gn_ref_snap == "preset"
+                                       and _gforeign)):
                         report.append(
-                            f"ref snap: gen does not match the ref (core "
-                            f"{_core:.0f}% of px near a ref color, median "
-                            f"{_gmed:.0f}) -- keeping the gen's own colors")
+                            f"ref snap: {'FOREIGN GEN, always-snap stood down' if _gforeign else 'gen does not match the ref'} "
+                            f"(core {_core:.0f}% of px near a ref color, "
+                            f"median {_gmed:.0f}) -- keeping the gen's own "
+                            f"colors")
                     else:
                         if _gtrip:
                             report.append(
@@ -1323,11 +1728,24 @@ class PixelForgeSuperForge:
 
         # ---------------- loop trim ----------------
         _mark("loop")
-        images, alpha, loop_info = PixelForgeLoopTrim().run(
-            images, _LOOPS[loop_mode],
-            _pick(adv_loop_max_error, 0.06),
-            _pick(adv_loop_tail, 0.5), alpha=alpha)
-        report.append(f"loop: {loop_info}")
+        if _gennative:
+            # v3.11.21: gen-native keeps ALL frames. The trim found a
+            # "loop point" at 33 on live 85665631 and dropped frames 34-56
+            # -- the pose cycles there but flying content (drops) does not,
+            # and the owner wants the full clip. Legacy ref look trims as
+            # before.
+            images = images
+            loop_info = json.dumps({"mode": "gen-native: trim skipped",
+                                    "input_frames": images.shape[0],
+                                    "note": "all frames kept"})
+            report.append(f"loop: gen-native keeps all "
+                          f"{images.shape[0]} frames")
+        else:
+            images, alpha, loop_info = PixelForgeLoopTrim().run(
+                images, _LOOPS[loop_mode],
+                _pick(adv_loop_max_error, 0.06),
+                _pick(adv_loop_tail, 0.5), alpha=alpha)
+            report.append(f"loop: {loop_info}")
 
         # ---------------- dedup -> final ----------------
         _mark("dedup")
@@ -1335,7 +1753,8 @@ class PixelForgeSuperForge:
         durations_frames = None
         if remove_duplicate_frames:
             images, alpha, durations_json = PixelForgeFrameDedup().run(
-                images, _pick(adv_dedup_threshold, 0.01), alpha=alpha)
+                images, _pick(adv_dedup_threshold, 0.01), alpha=alpha,
+                strong_keep=_gennative)
             try:
                 durations_frames = json.loads(durations_json).get("durations_frames")
             except Exception:

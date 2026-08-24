@@ -758,12 +758,18 @@ class PixelForgeFrameDedup:
             "optional": {"alpha": ("MASK",)},
         }
 
-    def run(self, images, threshold, alpha=None):
+    def run(self, images, threshold, alpha=None, strong_keep=False):
+        # strong_keep (v3.11.20, gen-native): a frame with ANY strong cell
+        # change (alpha flip or real color move somewhere) is CONTENT, not a
+        # duplicate -- the mean metric merges frames whose only difference
+        # is a few flying droplet cells (live 85665631: 56 -> 33 frames,
+        # distant-drop frames merged away).
         n = images.shape[0]
         keep = [0]
         durations = []
         for i in range(1, n):
             j = keep[-1]
+            strong = False
             if alpha is None:
                 d = float((images[i:i + 1].float() - images[j:j + 1].float()).abs().mean())
             else:
@@ -778,7 +784,11 @@ class PixelForgeFrameDedup:
                     d_rgb = (images[i].float() * ai - images[j].float() * aj).abs().mean(-1)
                     d_a = (alpha[i].float() - alpha[j].float()).abs()
                     d = float((d_rgb + d_a)[au].mean() * 0.5)
-            if d > threshold:
+                    if strong_keep:
+                        flip = ((alpha[i] > 0.5) != (alpha[j] > 0.5)) & au
+                        dcell = (images[i].float() - images[j].float()).abs().mean(-1)
+                        strong = bool((flip | ((dcell > 0.1) & au)).any())
+            if d > threshold or strong:
                 durations.append(i - keep[-1])
                 keep.append(i)
         durations.append(n - keep[-1])
