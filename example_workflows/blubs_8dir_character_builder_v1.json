@@ -1160,6 +1160,15 @@
             "name": "adv_ref_look_mode"
           },
           "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -2585,6 +2594,15 @@
           "type": "COMBO",
           "widget": {
             "name": "adv_ref_look_mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
           },
           "link": null
         }
@@ -4014,6 +4032,15 @@
             "name": "adv_ref_look_mode"
           },
           "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -5439,6 +5466,15 @@
           "type": "COMBO",
           "widget": {
             "name": "adv_ref_look_mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
           },
           "link": null
         }
@@ -6868,6 +6904,15 @@
             "name": "adv_ref_look_mode"
           },
           "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -8293,6 +8338,15 @@
           "type": "COMBO",
           "widget": {
             "name": "adv_ref_look_mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
           },
           "link": null
         }
@@ -9722,6 +9776,15 @@
             "name": "adv_ref_look_mode"
           },
           "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -11147,6 +11210,15 @@
           "type": "COMBO",
           "widget": {
             "name": "adv_ref_look_mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "view",
+          "name": "view",
+          "type": "COMBO",
+          "widget": {
+            "name": "view"
           },
           "link": null
         }
