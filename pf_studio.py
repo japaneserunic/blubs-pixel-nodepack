@@ -713,8 +713,15 @@ class PixelForgeSuperForge:
             images, alpha, gw, gh, ginfo = PixelForgeGridRecover().run(
                 images, adv_grid_mode, adv_grid_block, adv_grid_max_block,
                 adv_grid_reduce, False, alpha=alpha,
-                nominal_on_empty=(None if custom_palette_image is not None
-                                  else 4),
+                # v3.11.26: gen-native ALWAYS gets the nominal protection.
+                # The old rule passed None whenever a ref was armed ("the
+                # refdensity ruler owns ref-flow density") -- but gen-native
+                # SKIPS refdensity, so GridRecover ran unprotected and the
+                # s=6 comb won (live e7cc7a8c: block 6 = 101x58, half the
+                # R2V density; clothing shading crushed). Legacy ref look
+                # (refdensity overrides) keeps None = byte-identical.
+                nominal_on_empty=(None if (custom_palette_image is not None
+                                           and not _gennative) else 4),
                 # v3.11.13: keep silhouette boundary blocks at 35%% coverage
                 # (majority 0.5 ate the outer art-pixel ring, live 5fb8bff4cc)
                 alpha_keep=(0.35 if _gennative else 0.5))
