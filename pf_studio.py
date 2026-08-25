@@ -1477,6 +1477,9 @@ class PixelForgeSuperForge:
                         f"k-means threshold")
             except Exception as _e7:
                 report.append(f"lineart: skipped ({_e7})")
+            except Exception as _e7:
+                report.append(f"lineart: skipped ({_e7})")
+
 
             # v3.10.5-refsnap: snap the flattened blocks onto the ref's
             # EXACT palette (integer-grid modal reduce, no kmeans). The
