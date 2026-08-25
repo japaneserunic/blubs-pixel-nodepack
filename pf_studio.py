@@ -91,22 +91,18 @@ _REF_LOOK_MODES = [_REF_LOOK_MODE_GEN, _REF_LOOK_MODE_LEGACY]
 _SRC_SIZE_MODES = ("Source (H3's own grid)", "Source / 2 (balanced)")
 _SUITE_LOOKS = list(_LOOKS) + [_REF_LOOK]
 
-
 def _pick(v, default):
     """-1 sentinel = keep the value the main knobs selected."""
     return default if v == -1 else v
 
-
 def _tri(v, default):
     return default if v == "preset" else (v == "on")
-
 
 def _thin_indices(n, cap):
     if n <= cap:
         return list(range(n))
     return sorted(set(int(round(x)) for x in
                       np.linspace(0, n - 1, cap).tolist()))
-
 
 def _save_stage(tag, uid, images, alpha, cap, max_edge=512, pixel_exact=False):
     """Write a thinned RGBA preview set to ComfyUI's temp dir.
@@ -140,7 +136,6 @@ def _save_stage(tag, uid, images, alpha, cap, max_edge=512, pixel_exact=False):
     meta = {"frames": int(n), "shown": len(refs), "w": int(w), "h": int(h),
             "skipped": False}
     return refs, meta
-
 
 class PixelForgeSuperForge:
     """The suite. Same pipeline contract as Sprite Studio (Easy v2) — wire it
@@ -1482,54 +1477,6 @@ class PixelForgeSuperForge:
                         f"k-means threshold")
             except Exception as _e7:
                 report.append(f"lineart: skipped ({_e7})")
-            # v3.11.24-temporalock: per-cell temporal mode lock. Inner
-            # line cells flip between the consolidated dark shades
-            # frame-to-frame (owner: "inner lines not holding shape").
-            # A cell that holds ONE color for >= 70% of its opaque frames
-            # is a stable detail -> locked to that color everywhere;
-            # cells with no dominant color are genuinely animating and
-            # stay live.
-            try:
-                _n8 = _ga7.shape[0]
-                if _n8 >= 8:
-                    _keys8 = ((_ga7[..., 0].astype(np.int64) << 16)
-                              | (_ga7[..., 1].astype(np.int64) << 8)
-                              | _ga7[..., 2].astype(np.int64))
-                    _op8 = _aa7 > 0.5
-                    _minf = max(8, int(0.5 * _n8))
-                    _dom = 0.70
-                    _locked = 0
-                    _hh, _ww = _ga7.shape[1:3]
-                    for _y in range(_hh):
-                        for _x in range(_ww):
-                            _m8 = _op8[:, _y, _x]
-                            _c8 = int(_m8.sum())
-                            if _c8 < _minf:
-                                continue
-                            _kv = _keys8[:, _y, _x][_m8]
-                            _u, _cnt = np.unique(_kv, return_counts=True)
-                            _mi = int(np.argmax(_cnt))
-                            if _cnt[_mi] / _c8 < _dom:
-                                continue
-                            _mk = int(_u[_mi])
-                            _mc = np.array([(_mk >> 16) & 255,
-                                            (_mk >> 8) & 255,
-                                            _mk & 255], dtype=np.float32)
-                            _cell = _m8 & (_keys8[:, _y, _x] != _mk)
-                            if _cell.any():
-                                _ga7[_cell, _y, _x] = _mc
-                                _locked += int(_cell.sum())
-                    if _locked:
-                        images = torch.from_numpy(
-                            (_ga7 / 255.0).astype(np.float32)).to(
-                                images.device)
-                        grid_frames = images
-                    report.append(
-                        f"temporalock: locked {_locked} unstable cells "
-                        f"to their dominant color (>=70% of "
-                        f"{_n8} frames)")
-            except Exception as _e8:
-                report.append(f"temporalock: skipped ({_e8})")
 
             # v3.10.5-refsnap: snap the flattened blocks onto the ref's
             # EXACT palette (integer-grid modal reduce, no kmeans). The
@@ -1978,7 +1925,6 @@ class PixelForgeSuperForge:
             },
             "result": (images, alpha, durations_json, palette_json, report_str),
         }
-
 
 NODE_CLASS_MAPPINGS = {"PixelForgeSuperForge": PixelForgeSuperForge}
 NODE_DISPLAY_NAME_MAPPINGS = {"PixelForgeSuperForge": "ᛒᛚᚢᛒ Super Pixel Forge"}
